@@ -1,0 +1,125 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Stellar-IndigoPay/Stellar-IndigoPay/blob/main/backend/src/lib/webhookSign.vectors.json",
+  "description": "Canonical test vectors for the Stellar-IndigoPay webhook signature scheme (v1: HMAC-SHA256). These vectors are machine-readable and locked by webhookSign.vectors.test.js. Clients implementing verification in any language should reproduce these signatures exactly.",
+  "algorithm": "HMAC-SHA256",
+  "version": "v1",
+  "signed_content_format": "<timestamp>.<body>",
+  "header_format": "t=<unix>,v1=<hex-hmac-sha256>",
+  "notes": [
+    "The signed content is the string concatenation of the decimal timestamp, a literal period '.', and the raw body bytes (UTF-8).",
+    "Empty body is valid — the signed content is '<timestamp>.' (timestamp + period + empty string).",
+    "Unicode bodies are encoded as UTF-8 before signing.",
+    "The header is a comma-separated list of k=v pairs. Parsers must handle k=v pairs with values that contain '=' (e.g. future base64-encoded versions).",
+    "Unknown version prefixes (e.g. 'v3=...') must be rejected with UNKNOWN_VERSION — never silently accepted.",
+    "Timestamp tolerance is ±300 seconds by default; configurable via WEBHOOK_REPLAY_WINDOW_SECONDS."
+  ],
+  "cross_language_notes": {
+    "node": "crypto.createHmac('sha256', secret).update(`${timestamp}.${body}`).digest('hex')",
+    "python": "hmac.new(secret.encode(), f'{timestamp}.'.encode() + body_bytes, hashlib.sha256).hexdigest()",
+    "go": "mac := hmac.New(sha256.New, []byte(secret)); mac.Write([]byte(fmt.Sprintf(\"%d.\", ts))); mac.Write(bodyBytes); hex.EncodeToString(mac.Sum(nil))",
+    "ruby": "OpenSSL::HMAC.hexdigest('SHA256', secret, \"#{timestamp}.#{body}\")",
+    "php": "hash_hmac('sha256', \"{$timestamp}.{$body}\", $secret)"
+  },
+  "vectors": [
+    {
+      "id": "v1-basic",
+      "description": "Standard JSON body, basic secret",
+      "secret": "test-secret-1",
+      "body": "{\"event\":\"milestone.reached\"}",
+      "timestamp": 1700000000,
+      "expected_v1": "740805f13b8d9a5ab9827413331da721207a7ddd557cf1c8e14bff6adfa33063",
+      "expected_header": "t=1700000000,v1=740805f13b8d9a5ab9827413331da721207a7ddd557cf1c8e14bff6adfa33063"
+    },
+    {
+      "id": "v1-empty-payload",
+      "description": "Empty body — signed content is '<timestamp>.'",
+      "secret": "test-secret-1",
+      "body": "",
+      "timestamp": 1700000001,
+      "expected_v1": "4a5a24a91b5a30189879fad1fc3c3958f638e9e45ccf35fe3bc69f69953ef741",
+      "expected_header": "t=1700000001,v1=4a5a24a91b5a30189879fad1fc3c3958f638e9e45ccf35fe3bc69f69953ef741"
+    },
+    {
+      "id": "v1-unicode",
+      "description": "Unicode body with non-ASCII chars and emoji (UTF-8 encoded)",
+      "secret": "test-secret-2",
+      "body": "{\"message\":\"h\u00e9llo w\u00f6rld \ud83c\udf0d\"}",
+      "timestamp": 1700000002,
+      "expected_v1": "1e0de03a45133800827546d6493902c960ead0db1c3e6587a2955fb7f96db908",
+      "expected_header": "t=1700000002,v1=1e0de03a45133800827546d6493902c960ead0db1c3e6587a2955fb7f96db908"
+    },
+    {
+      "id": "v1-large-payload",
+      "description": "10,000-byte body of repeated 'x' characters",
+      "secret": "test-secret-3",
+      "body_repeat": { "char": "x", "count": 10000 },
+      "body_note": "body is 'x' repeated 10000 times",
+      "timestamp": 1700000003,
+      "expected_v1": "362727b68f22a2de39da1910a65cb725c178f67c8b5e9391160feb68ffbd7792",
+      "expected_header": "t=1700000003,v1=362727b68f22a2de39da1910a65cb725c178f67c8b5e9391160feb68ffbd7792"
+    },
+    {
+      "id": "v1-different-ts",
+      "description": "Same body and secret as v1-basic but different timestamp — signature must differ",
+      "secret": "test-secret-1",
+      "body": "{\"event\":\"milestone.reached\"}",
+      "timestamp": 1700001000,
+      "expected_v1": "dbc598613bc91bddd24c98f7a40912b1115ac1c116a0a4966efb2b40d6792fd0",
+      "expected_header": "t=1700001000,v1=dbc598613bc91bddd24c98f7a40912b1115ac1c116a0a4966efb2b40d6792fd0"
+    },
+    {
+      "id": "v1-special-chars-in-secret",
+      "description": "Secret containing shell-special characters",
+      "secret": "sec!@#$%^&*()",
+      "body": "{\"data\":\"value\"}",
+      "timestamp": 1700000005,
+      "expected_v1": "c18b137648103610c42ca489c933b9f2ebd945bea82355ed2700f96f761d4801",
+      "expected_header": "t=1700000005,v1=c18b137648103610c42ca489c933b9f2ebd945bea82355ed2700f96f761d4801"
+    },
+    {
+      "id": "v1-long-secret",
+      "description": "128-character secret (longer than SHA-256 block size — HMAC pads correctly)",
+      "secret": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "body": "{\"hello\":\"world\"}",
+      "timestamp": 1700000006,
+      "expected_v1": "7b8c9d70a1319d45b9509184274fdea1973bc52ec3df6b5eaf1465ec94a0a0d2",
+      "expected_header": "t=1700000006,v1=7b8c9d70a1319d45b9509184274fdea1973bc52ec3df6b5eaf1465ec94a0a0d2"
+    }
+  ],
+  "rejection_vectors": [
+    {
+      "id": "reject-stale-past",
+      "description": "Signature is valid but timestamp is 10 minutes in the past (outside 5-min window)",
+      "reason": "STALE"
+    },
+    {
+      "id": "reject-stale-future",
+      "description": "Signature is valid but timestamp is 10 minutes in the future (outside 5-min window)",
+      "reason": "STALE"
+    },
+    {
+      "id": "reject-tampered-body",
+      "description": "Valid signature but body was modified after signing",
+      "reason": "MISMATCH"
+    },
+    {
+      "id": "reject-unknown-version",
+      "description": "Header contains only an unrecognised version prefix (e.g. 'v3=...')",
+      "header_example": "t=1700000000,v3=abc123",
+      "reason": "UNKNOWN_VERSION"
+    },
+    {
+      "id": "reject-missing-t",
+      "description": "Header has no t= field",
+      "header_example": "v1=740805f13b8d9a5ab9827413331da721207a7ddd557cf1c8e14bff6adfa33063",
+      "reason": "MISSING_T"
+    },
+    {
+      "id": "reject-empty-header",
+      "description": "Empty or absent header",
+      "header_example": "",
+      "reason": "MALFORMED"
+    }
+  ]
+}

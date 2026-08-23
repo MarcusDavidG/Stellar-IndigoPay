@@ -12,10 +12,38 @@ verification flow are designed to be easy to consume in any language.
 | `X-Webhook-Event-Type`  | Currently always `milestone.reached`.                                                 |
 | `X-Webhook-Delivery-Id` | Internal `webhook_deliveries` row uuid.                                               |
 | `X-Webhook-Timestamp`   | Unix seconds at sign time.                                                            |
-| `X-Webhook-Signature`   | `t=<unix>,v1=<hex hmac-sha256(secret, "<ts>.<body>")>`                                |
+| `X-Webhook-Signature`   | `t=<unix>,v1=<hex hmac-sha256(secret, "<ts>.<body>")>` — see [Algorithm Versioning](webhook-signing-versioning.md) |
 | `X-Webhook-Attempt`     | 1-based attempt counter.                                                              |
 | `User-Agent`            | `Stellar-IndigoPay-Webhook/1.0`                                                       |
 | `Content-Type`          | `application/json`                                                                    |
+
+### Signature header format
+
+```
+X-Webhook-Signature: t=<unix seconds>,v1=<hex hmac-sha256>
+```
+
+The header is a comma-separated list of `k=v` pairs. `v1` is the algorithm
+version identifier — **always check for it explicitly**. Headers containing
+only unrecognised version prefixes (e.g. `v3=...`) must be rejected. During
+a future algorithm transition the server will emit both `v1=` and `v2=`;
+accept if any recognised version validates.
+
+See [webhook-signing-versioning.md](webhook-signing-versioning.md) for the
+full versioning policy, error codes, and migration path.
+
+### Signature error codes
+
+Your verifier should return structured reason codes so you can distinguish
+different failure modes:
+
+| Reason | HTTP (inbound) | Meaning |
+|--------|---------------|---------|
+| `MALFORMED` | 400 | Header absent, empty, or not parseable |
+| `MISSING_T` | 400 | `t=` field absent or not a finite integer |
+| `UNKNOWN_VERSION` | 403 | No recognised version prefix — fail-closed |
+| `STALE` | 408 | Timestamp outside replay window — check clock sync |
+| `MISMATCH` | 401 | HMAC mismatch — tampered body or wrong secret |
 
 ## Body
 
@@ -42,32 +70,52 @@ received, not the parsed object.
 ```js
 const crypto = require("crypto");
 
+// Error reason codes — mirror VerifyReason in webhookSign.js
+const Reason = {
+  OK: "OK",
+  MALFORMED: "MALFORMED",
+  MISSING_T: "MISSING_T",
+  UNKNOWN_VERSION: "UNKNOWN_VERSION",
+  STALE: "STALE",
+  MISMATCH: "MISMATCH",
+};
+
 function verify(body, secret, header) {
+  if (typeof header !== "string" || header.length === 0)
+    return { ok: false, reason: Reason.MALFORMED };
+
+  // Parse comma-separated k=v pairs (split on first '=' only)
   const parts = Object.fromEntries(
-    header.split(",").map((kv) => {
-      const [k, v] = kv.split("=");
-      return [k.trim(), v.trim()];
+    header.split(",").map((token) => {
+      const eq = token.indexOf("=");
+      return eq === -1
+        ? [token.trim(), ""]
+        : [token.slice(0, eq).trim(), token.slice(eq + 1).trim()];
     }),
   );
+
   const t = Number.parseInt(parts.t, 10);
+  if (!Number.isFinite(t)) return { ok: false, reason: Reason.MISSING_T };
+
+  // Fail-closed: reject if no recognised version key present
   const v1 = parts.v1;
-  if (!Number.isFinite(t) || !v1) return { ok: false, reason: "malformed" };
+  if (!v1) return { ok: false, reason: Reason.UNKNOWN_VERSION };
+
+  // Replay window: reject events whose timestamp is more than 5 minutes
+  // away from local clock. STALE is distinct from MISMATCH so you can
+  // alert on clock-synchronisation issues separately.
+  const skew = Math.abs(Math.floor(Date.now() / 1000) - t);
+  if (skew > 5 * 60) return { ok: false, reason: Reason.STALE };
 
   const expected = crypto
     .createHmac("sha256", secret)
     .update(`${t}.${body}`)
     .digest();
   const got = Buffer.from(v1, "hex");
-  if (got.length !== expected.length) return { ok: false, reason: "length" };
-  if (!crypto.timingSafeEqual(got, expected))
-    return { ok: false, reason: "mismatch" };
+  if (got.length !== expected.length || !crypto.timingSafeEqual(got, expected))
+    return { ok: false, reason: Reason.MISMATCH };
 
-  // Replay window: reject events whose timestamp is more than 5 minutes
-  // away from local clock.
-  const skew = Math.abs(Math.floor(Date.now() / 1000) - t);
-  if (skew > 5 * 60) return { ok: false, reason: "stale" };
-
-  return { ok: true };
+  return { ok: true, reason: Reason.OK };
 }
 ```
 

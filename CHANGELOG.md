@@ -256,6 +256,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **backend/security:** productionize webhook signature scheme — add `VerifyReason` error codes (`MALFORMED`, `MISSING_T`, `UNKNOWN_VERSION`, `STALE`, `MISMATCH`), `verifyWithReason()` API, `SUPPORTED_VERSIONS` enum, `webhookVerify` Express middleware with structured HTTP-status mapping, canonical cross-language test vectors (`webhookSign.vectors.json`, locked by `webhookSign.vectors.test.js`), and algorithm versioning policy doc (`docs/webhook-signing-versioning.md`) covering v1→v2 dual-sign migration path (closes #933)
+
 ### Fixed
 - **indigopay-contract:** Reconciled the campaign escrow custody model by funding the escrow job directly from `ProjectContractBalance(project, token)` instead of `project.total_raised`. This prevents escrow creation failures when donations bypass the contract (e.g. direct-to-wallet) and correctly rejects funding with `InsufficientContractBalanceForEscrow` if the contract holds insufficient funds.
 - **backend:** Serialize migration runs across replicas with a Postgres advisory lock so concurrent boot (k8s HPA min 2) can never apply the same migrations twice (closes #640). Also fixes the migration chain so a fresh database can be bootstrapped end-to-end: `002` drops `CREATE INDEX CONCURRENTLY` (invalid inside the runner's transaction), a new `010_admin_audit_log` migration creates the audit table `011` depends on, `011`'s hash-chain backfill is repaired (uuid/json casts, missing CTE column, `pgcrypto` extension), `021` uses drop-then-add for its CHECK constraint, and `027` guards its example `credits` migration against a missing table. Adds a testcontainers concurrency test proving two concurrent `runMigrations()` calls apply each migration exactly once.
