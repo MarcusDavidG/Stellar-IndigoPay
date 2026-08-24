@@ -107,12 +107,14 @@ function webhookVerify(options = {}) {
 
     // Body must be raw bytes/string. express.raw() gives a Buffer; toString()
     // gives the UTF-8 string that was signed.
-    const rawBody =
-      Buffer.isBuffer(req.body)
-        ? req.body.toString("utf8")
-        : typeof req.body === "string"
-        ? req.body
-        : JSON.stringify(req.body);
+    let rawBody;
+    if (Buffer.isBuffer(req.body)) {
+      rawBody = req.body.toString("utf8");
+    } else if (typeof req.body === "string") {
+      rawBody = req.body;
+    } else {
+      rawBody = JSON.stringify(req.body);
+    }
 
     const now = Math.floor(Date.now() / 1000);
     const { ok, reason } = verifyWithReason(

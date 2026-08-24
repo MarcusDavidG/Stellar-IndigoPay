@@ -22,7 +22,6 @@
  * interoperable with IndigoPay's signer.
  */
 
-const crypto = require("crypto");
 const { sign, verify, verifyWithReason, VerifyReason } = require("./webhookSign");
 const vectors = require("./webhookSign.vectors.json");
 
