@@ -1,5 +1,27 @@
 import type { Page, Route } from "@playwright/test";
 
+/**
+ * Credential-compatible CORS headers for the mock API.
+ *
+ * The mock is served cross-origin (lib/api.ts targets http://localhost:4000
+ * while the app runs on the Playwright baseURL), so responses must carry an
+ * Access-Control-Allow-Origin. Because requests are credentialed (lib/api.ts
+ * sends cookies), the allow-origin MUST echo the exact request origin — a bare
+ * `*` is rejected by the browser when Access-Control-Allow-Credentials=1. We
+ * also emit Vary: Origin so caches never reuse a header meant for another
+ * origin.
+ */
+function corsHeaders(origin: string | undefined): Record<string, string> {
+  const headers: Record<string, string> = { Vary: "Origin" };
+  if (origin) headers["Access-Control-Allow-Origin"] = origin;
+  return headers;
+}
+
+async function requestOrigin(route: Route): Promise<string | undefined> {
+  const h = await route.request().headers();
+  return h["origin"];
+}
+
 export const MOCK_PROJECT = {
   id: "e4aa582a-e87f-4fef-9a5c-55c32918bb12",
   name: "Amazon Reforestation",
@@ -146,13 +168,14 @@ export const MOCK_ANALYTICS = {
  * Mock Backend API responses using Playwright route interception.
  */
 export async function mockApi(page: Page) {
-  // Global CORS preflight handler
-  await page.route("**/api/v1/**", (route: Route) => {
+  // Global CORS preflight handler — echo the request origin (never `*`) so
+  // credentialed cross-origin requests are allowed.
+  await page.route("**/api/v1/**", async (route: Route) => {
     if (route.request().method() === "OPTIONS") {
       return route.fulfill({
         status: 200,
         headers: {
-          "Access-Control-Allow-Origin": "*",
+          ...corsHeaders(await requestOrigin(route)),
           "Access-Control-Allow-Methods":
             "GET, POST, PUT, PATCH, DELETE, OPTIONS",
           "Access-Control-Allow-Headers":
@@ -356,10 +379,11 @@ export async function mockApi(page: Page) {
   });
 
   // Leaderboard (WS7 synthetic-donation: the donor must appear after donating)
-  await page.route("**/api/v1/leaderboard*", (route: Route) => {
+  await page.route("**/api/v1/leaderboard*", async (route: Route) => {
     return route.fulfill({
       status: 200,
       contentType: "application/json",
+      headers: corsHeaders(await requestOrigin(route)),
       body: JSON.stringify({ success: true, data: MOCK_LEADERBOARD }),
     });
   });
