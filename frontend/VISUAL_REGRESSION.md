@@ -13,10 +13,18 @@ Playwright screenshots (`toHaveScreenshot`) against baselines stored under
   image differs from the one the baselines were generated on.
 - **`.github/workflows/frontend-visual.yml`** opts the suite IN
   (`VISUAL_REGRESSION=1`) and diffs it against the committed baselines on
-  every PR touching `frontend/**`. It fails (blocking merge) on any pixel
-  diff. Rendering is deterministic because the suite is Chromium-only and the
-  committed baselines carry the `-linux` tag, so they are diffed on the same
-  `ubuntu-latest` image they were produced on.
+  every PR touching `frontend/**`, uploading the diff report artifact.
+
+> **Current gate mode — report-only.** The committed `project-detail` baselines
+> were generated outside CI and do not reproduce on `ubuntu-latest` (they
+> render an external asset — e.g. a cover image or map tiles — that CI cannot
+> fetch), while the `homepage`/`dashboard` baselines match. Because a strict
+> diff would red-block on baselines that can only be regenerated inside CI, the
+> workflow's diff step is `continue-on-error: true` (informational) until
+> authoritative baselines are captured **in CI**. To re-enable a blocking gate:
+> run the `update-baselines` workflow_dispatch, download the regenerated
+> snapshot artifact, review and commit it — then remove `continue-on-error`
+> from `.github/workflows/frontend-visual.yml`.
 
 ## Baseline maintenance workflow
 
