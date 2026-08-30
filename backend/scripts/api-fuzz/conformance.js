@@ -18,6 +18,7 @@ const {
   generateValidValue,
   mutationStrategies,
   reset,
+  rand,
 } = require("./values.js");
 const { validate } = require("./validator.js");
 
@@ -31,7 +32,10 @@ function defaultLogger(...args) {
  * @param {object} options { validCount, invalidCount, seed }
  * @returns {Array<{kind:string,label:string,body:any}>}
  */
-function buildCases(op, { validCount = 1, invalidCount = 1, seed = 1 } = {}) {
+function buildCases(
+  op,
+  { validCount = 1, invalidCount = 1, seed = 1, components = null } = {},
+) {
   const cases = [];
   const bodySchema = op.requestBodySchema;
 
@@ -43,13 +47,17 @@ function buildCases(op, { validCount = 1, invalidCount = 1, seed = 1 } = {}) {
     return cases;
   }
 
-  const validBodies = generateValidBodies(bodySchema.schema, validCount);
+  const validBodies = generateValidBodies(bodySchema.schema, validCount, components);
   validBodies.forEach((body, i) =>
     cases.push({ kind: "valid", label: `valid-${i}`, body }),
   );
 
   for (let i = 0; i < invalidCount; i++) {
-    const body = generateInvalidValue(bodySchema.schema, validBodies[0]);
+    const body = generateInvalidValue(
+      bodySchema.schema,
+      validBodies[0],
+      components,
+    );
     cases.push({
       kind: "invalid",
       label: `invalid-${i}:${body.__strategy__ || "fallback"}`,
@@ -61,10 +69,10 @@ function buildCases(op, { validCount = 1, invalidCount = 1, seed = 1 } = {}) {
   return cases;
 }
 
-function generateValidBodies(schema, count) {
+function generateValidBodies(schema, count, components = null) {
   const out = [];
   for (let i = 0; i < count; i++)
-    out.push(generateValidValue(schema, null, new Set()));
+    out.push(generateValidValue(schema, components, new Set()));
   return out;
 }
 
@@ -79,17 +87,20 @@ function generateValidBodies(schema, count) {
  * truly violates the schema, which is what makes the “no 5xx for invalid input”
  * live-scan criterion mean something.
  */
-function generateInvalidValue(schema, validBase) {
+function generateInvalidValue(schema, validBase, components = null) {
   const base =
     validBase !== undefined
       ? JSON.parse(JSON.stringify(validBase))
-      : generateValidValue(schema, null, new Set());
-  const mutators = mutationStrategies(schema, null).slice(1);
+      : generateValidValue(schema, components, new Set());
+  const mutators = mutationStrategies(schema, components).slice(1);
   const attempts = Math.max(1, mutators.length * 2);
   for (let i = 0; i < attempts; i++) {
-    const m = mutators[Math.floor(Math.random() * mutators.length)];
+    // Deterministic per seed: the shared xorshift RNG is reset by runConformance,
+    // so the same seed yields the same mutator sequence and the same invalid
+    // payloads — reproducible failures for CI debugging.
+    const m = mutators[Math.floor(rand() * mutators.length)];
     const mutated = m(JSON.parse(JSON.stringify(base)));
-    const verdict = validate(mutated, schema, null, new Set());
+    const verdict = validate(mutated, schema, components, new Set());
     if (!verdict.valid) {
       return { __strategy__: m.name, __value__: mutated };
     }
@@ -130,6 +141,7 @@ async function runConformance({
   iterations = 100,
   seed = Date.now(),
   log = defaultLogger,
+  components = null,
 }) {
   reset(seed);
   const violations = [];
@@ -141,6 +153,7 @@ async function runConformance({
       validCount: 1,
       invalidCount: iterations,
       seed,
+      components,
     });
     const stats = {
       sent: 0,
@@ -231,11 +244,13 @@ async function runConformance({
         );
       }
 
-      // Response-schema conformance for 2xx with a JSON body.
+      // Response-schema conformance for 2xx with a JSON body. Thread the spec's
+      // components through so nested $refs (e.g. data -> Project) keep their
+      // constraints instead of resolving to empty schemas.
       if (status >= 200 && status < 300 && op.successSchema) {
         const body = await readJsonSafely(res);
         if (body.parsed != null && typeof body.parsed === "object") {
-          const v = validate(body.parsed, op.successSchema, null, new Set());
+          const v = validate(body.parsed, op.successSchema, components, new Set());
           if (!v.valid) {
             stats.schemaViolations++;
             constrain(violations, {

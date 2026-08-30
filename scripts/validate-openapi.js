@@ -155,11 +155,15 @@ function runFuzzSelfTest(spec, iterations) {
 
   for (const op of plan) {
     if (!op.requestBodySchema) continue; // GET-style endpoints have no body to fuzz
-    const cases = buildCases(op, { validCount: 1, invalidCount: iterations });
+    const cases = buildCases(op, {
+      validCount: 1,
+      invalidCount: iterations,
+      components: spec.components,
+    });
     const label = `${op.method} ${op.path}`;
 
     for (const c of cases) {
-      const result = validate(c.body, op.requestBodySchema.schema);
+      const result = validate(c.body, op.requestBodySchema.schema, spec.components);
       const expected = c.kind === "valid";
       if (c.kind === "valid") validSeen++;
       else invalidSeen++;
@@ -205,7 +209,8 @@ async function runLiveMode(spec, baseUrl, iterations) {
     const result = await runConformance({
       plan,
       baseUrl,
-      iterations: Math.max(1, iterations),
+      iterations,
+      components: spec.components,
     });
 
     const errors = result.violations.filter((v) => v.level === "error");
@@ -230,12 +235,35 @@ function main() {
   const errors = [];
   let drift = { missing: [], extra: [] };
 
-  // ── CLI args (fuzz mode) ────────────────────────────────────────────────
+  // ── CLI args (fuzz / live modes) ────────────────────────────────────────
+  // Iterations apply to BOTH modes. `--iterations N` is the canonical knob;
+  // the legacy positional form `--fuzz N` still works. Values are validated as
+  // positive integers before they touch a shell or network call.
   const argv = process.argv.slice(2);
-  const fuzzIdx = argv.indexOf("--fuzz");
-  const liveIdx = argv.indexOf("--live");
-  const fuzzIter = fuzzIdx !== -1 ? parseInt(argv[fuzzIdx + 1], 10) || 100 : 0;
-  const liveBase = liveIdx !== -1 ? argv[liveIdx + 1] : null;
+  const flagValue = (flag) => {
+    const i = argv.indexOf(flag);
+    const next = i !== -1 ? argv[i + 1] : undefined;
+    if (next !== undefined && !next.startsWith("--")) return next;
+    const inline = argv.find((a) => a.startsWith(`${flag}=`));
+    return inline ? inline.slice(flag.length + 1) : "";
+  };
+  const toPositiveInt = (v) => {
+    if (v === null || v === "") return null;
+    const n = Number(v);
+    if (!Number.isInteger(n) || n <= 0) {
+      throw new Error(`invalid iteration count "${v}" (expected a positive integer)`);
+    }
+    return n;
+  };
+
+  const fuzzMode = argv.includes("--fuzz");
+  const liveMode = argv.includes("--live");
+  const iterations =
+    toPositiveInt(flagValue("--iterations") || null) ??
+    (fuzzMode ? toPositiveInt(flagValue("--fuzz") || null) : null) ??
+    100;
+  const liveBase =
+    liveMode && flagValue("--live") !== null ? flagValue("--live") : null;
 
   console.log("\n🔍 Validating OpenAPI spec against project conventions...\n");
 
@@ -251,12 +279,20 @@ function main() {
 
     // Fuzz modes short-circuit after the static convention checks (they already
     // load the spec and the offline self-test asserts generator invariants).
-    if (fuzzIdx !== -1) {
-      exitCode = runFuzzMode(spec, fuzzIter) || exitCode;
+    if (fuzzMode) {
+      exitCode = runFuzzMode(spec, iterations) || exitCode;
     }
-    if (liveBase) {
+    if (liveMode) {
+      // Fail closed: a live run without a usable target must never report
+      // success without sending a single request.
+      if (!liveBase || !/^https?:\/\/[^\s]+/i.test(liveBase)) {
+        console.error(
+          "\n❌ --live requires a non-empty http(s) base URL (e.g. --live https://staging.example.com)\n",
+        );
+        process.exit(1);
+      }
       console.log(`\n🌐 Running live conformance fuzz against ${liveBase}…\n`);
-      runLiveMode(spec, liveBase, fuzzIter).then((code) => {
+      runLiveMode(spec, liveBase, iterations).then((code) => {
         process.exit(code || exitCode);
       });
       return; // async path owns exit
