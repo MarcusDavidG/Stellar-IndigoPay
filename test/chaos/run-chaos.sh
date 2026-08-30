@@ -131,6 +131,54 @@ fault_dance() {
   wait_for_marker "$RUN_DIR/$id.done.marker" 600
 }
 
+NET=$(docker inspect -f '{{range $k,$v := .NetworkSettings.Networks}}{{$k}} {{end}}' "$($COMPOSE ps -q backend)" | awk '{print $1}')
+
+# Partition dance (scenario 05): sever the docker-network link between the
+# backend and Redis (a stateful process that is unreachable — distinct from a
+# crash) and reconnect it once the driver finishes its mid-partition checks.
+partition_dance() {
+  local id="$1"
+  log "scenario $id: waiting for driver to arm the partition"
+  wait_for_marker "$RUN_DIR/$id.ready.marker" 600
+  local redis_cid
+  redis_cid=$($COMPOSE ps -q redis)
+  if [ -z "$NET" ]; then
+    log "could not determine the compose network — cannot partition Redis"
+    return 1
+  fi
+  log "scenario $id: partitioning Redis (disconnecting from network '$NET')"
+  docker network disconnect "$NET" "$redis_cid"
+  touch "$RUN_DIR/$id.faulted.marker"
+  log "scenario $id: waiting for driver mid-partition assertions"
+  wait_for_marker "$RUN_DIR/$id.during.marker" 600
+  log "scenario $id: healing partition — reconnecting Redis"
+  docker network connect "$NET" "$redis_cid"
+  wait_healthy "redis"
+  touch "$RUN_DIR/$id.recovered.marker"
+  log "scenario $id: waiting for driver to finish"
+  wait_for_marker "$RUN_DIR/$id.done.marker" 600
+}
+
+# Cascade dance (scenario 06): stop Redis AND Postgres together, let the
+# driver exercise the degraded-but-functional state, then bring both back.
+cascade_dance() {
+  local id="$1"
+  log "scenario $id: waiting for driver to arm the cascade"
+  wait_for_marker "$RUN_DIR/$id.ready.marker" 600
+  log "scenario $id: stopping Redis and Postgres"
+  $COMPOSE stop redis postgres
+  touch "$RUN_DIR/$id.faulted.marker"
+  log "scenario $id: waiting for driver mid-cascade assertions"
+  wait_for_marker "$RUN_DIR/$id.during.marker" 600
+  log "scenario $id: restoring Redis and Postgres"
+  $COMPOSE start redis postgres
+  wait_healthy "redis"
+  wait_healthy "postgres"
+  touch "$RUN_DIR/$id.recovered.marker"
+  log "scenario $id: waiting for driver to finish"
+  wait_for_marker "$RUN_DIR/$id.done.marker" 600
+}
+
 # ── Run scenarios 01 (Redis crash) and 02 (Postgres failover) ───────────────
 fault_dance "01" "redis" \
   "$COMPOSE stop redis" \
@@ -141,7 +189,10 @@ fault_dance "02" "postgres" \
   "$COMPOSE start postgres"
 
 # Scenarios 03 (Horizon outage) and 04 (Soroban RPC timeout) are fully
-# self-contained in the driver — just wait for the whole suite to finish.
+# self-contained in the driver. Scenarios 05 (Redis partition) and 06
+# (cascading failure) are host-injected above.
+partition_dance "05"
+cascade_dance "06"
 BACKEND_CID=$($COMPOSE ps -q backend)
 log "waiting for the driver to complete all scenarios"
 if ! $COMPOSE wait backend; then
