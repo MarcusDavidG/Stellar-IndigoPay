@@ -417,6 +417,19 @@ const recurringExecutionsTotal = new client.Counter({
   registers: [registry],
 });
 
+const stellarFeeBumpsTotal = new client.Counter({
+  name: "indigopay_stellar_fee_bumps_total",
+  help: "Total number of Stellar fee-bump transactions submitted to escalate a stalled submission (#1098 W1)",
+  registers: [registry],
+});
+
+const stellarSubmitDurationSeconds = new client.Histogram({
+  name: "indigopay_stellar_submit_duration_seconds",
+  help: "Duration of a full Stellar transaction submission (submit -> finality) in seconds (#1098 W1)",
+  buckets: [0.1, 0.5, 1, 2.5, 5, 10, 30, 60, 120],
+  registers: [registry],
+});
+
 const recurringPending = new client.Gauge({
   name: "indigopay_recurring_pending",
   help: "Number of active recurring donation schedules pending execution.",
@@ -643,11 +656,15 @@ const metrics = {
   donationBatcherDropTotal,
   donationBatchSize,
   donationBatchFlushDurationSeconds,
+  stellarFeeBumpsTotal,
+  stellarSubmitDurationSeconds,
 };
 
 module.exports = {
   registry,
   metrics,
+  stellarFeeBumpsTotal,
+  stellarSubmitDurationSeconds,
   idempotencyRaceWinsTotal,
   cacheHits,
   cacheMisses,
