@@ -14,26 +14,43 @@ const analyticsRateLimitHits = new Counter("analytics_rate_limit_hits");
 const analytics429Rate = new Rate("analytics_429_rate");
 
 // ── Scenarios ───────────────────────────────────────────────────────────────
-//
-// sustained  — 100 VUs for 60 s (baseline, mirrors issue #149 acceptance criteria)
-// ramp-up    — 0 → 100 VUs over 30 s, hold 60 s, ramp down 30 s
-// token-burst — 5 VUs × 2 iterations simulating dashboard spikes on /api/analytics/*
+//     sustained  — 100 VUs for 60 s (baseline, mirrors issue #149 acceptance criteria)
+//     ramp-up    — 0 → 100 VUs over 30 s, hold 60 s, ramp down 30 s
+//     token-burst — 5 VUs × 2 iterations simulating dashboard spikes on /api/analytics/*
 //               (token-bucket: capacity=10, refillRate=0.5)
+//     pr         — 20 VUs for 30 s (Workstream 6 regression baseline comparison)
 //
 // Run baseline:        k6 run scripts/load-test.js
 // Run ramp-up:         SCENARIO=ramp-up k6 run scripts/load-test.js
 // Run token-burst:     SCENARIO=token-burst k6 run scripts/load-test.js
+// Run PR-load:         SCENARIO=pr k6 run --summary-export out.json scripts/load-test.js
+//   then compare:      node scripts/load-test-compare.js \
+//       --baseline scripts/load-test-baseline.json --current out.json --comment
 
-const SCENARIO = __ENV.SCENARIO || "sustained";
+const RAW_SCENARIO = __ENV.SCENARIO || "sustained";
+// Workstream-6 knobs: allow overriding the default profile via env so CI can
+// tune the run without editing this file (e.g. PR_LOAD=1 uses a lighter load
+// and forces the `pr` profile so a scenario actually executes).
+const SCENARIO = __ENV.PR_LOAD === "1" ? "pr" : RAW_SCENARIO;
+const PR_LOAD = __ENV.PR_LOAD === "1" || SCENARIO === "pr";
+const PR_VUS = Number(__ENV.PR_VUS || 20);
+const PR_DURATION = __ENV.PR_DURATION || "30s";
 
 export const options = {
   scenarios: {
     sustained: {
       executor: "constant-vus",
-      vus: 100,
-      duration: "60s",
+      vus: PR_LOAD ? Math.min(PR_VUS, 100) : 100,
+      duration: PR_LOAD ? PR_DURATION : "60s",
       startTime: "0s",
-      ...(SCENARIO !== "sustained" && { exec: "_noop" }),
+      ...(((SCENARIO !== "sustained" && SCENARIO !== "pr") || PR_LOAD) && { exec: "_noop" }),
+    },
+    pr: {
+      executor: "constant-vus",
+      vus: PR_VUS,
+      duration: PR_DURATION,
+      startTime: "0s",
+      ...(SCENARIO !== "pr" && { exec: "_noop" }),
     },
     "ramp-up": {
       executor: "ramping-vus",

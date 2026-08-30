@@ -152,6 +152,14 @@ jobs:
       - name: Validate spec conventions + detect OpenAPI route drift
         run: node scripts/validate-openapi.js
 
+      # Workstream 4 — fast API fuzz self-test in PR CI. Guarantees the
+      # schema-derived fuzz generator's invariants: every labelled "valid" case
+      # satisfies its request schema, and every labelled "invalid" case truly
+      # violates it. This is the in-process gate; the heavy live scan runs nightly
+      # (fuzz-nightly.yml).
+      - name: API fuzz self-test (100 iterations/endpoint)
+        run: node scripts/validate-openapi.js --fuzz 100
+
   chaos:
     name: Backend Chaos Harness (worker crash-safety)
     runs-on: ubuntu-latest

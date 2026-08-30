@@ -26,6 +26,12 @@ const path = require("path");
 const yaml = require("js-yaml");
 const routeSurface = require("./lib/routeSurface");
 
+// Workstream-4 fuzz toolchain (dependency-free, under backend/ so it is covered
+// by the backend jest suite; required here via a relative path).
+const { buildPlan } = require("../backend/scripts/api-fuzz/plan.js");
+const { buildCases } = require("../backend/scripts/api-fuzz/conformance.js");
+const { validate } = require("../backend/scripts/api-fuzz/validator.js");
+
 const SPEC_PATH = path.resolve(__dirname, "..", "docs", "api", "openapi.yaml");
 const BACKEND_SRC_DIR = path.resolve(__dirname, "..", "backend", "src");
 
@@ -131,12 +137,105 @@ function checkRouteDrift(spec) {
 }
 
 /**
+ * Offline fuzz self-test (Workstream 4 — API fuzz conformance).
+ *
+ * Derives cases from the OpenAPI spec and proves the generator's guarantees:
+ *   - every “valid” case actually satisfies its request schema, and
+ *   - every “invalid” case genuinely violates it (so a live scan that sees a 2xx
+ *     or a 5xx for one of these is a real bug).
+ *
+ * Runs fast enough for PR CI (default 100 iterations/endpoint). Requires no
+ * network and no running backend.
+ */
+function runFuzzSelfTest(spec, iterations) {
+  const plan = buildPlan(spec);
+  const issues = [];
+  let validSeen = 0;
+  let invalidSeen = 0;
+
+  for (const op of plan) {
+    if (!op.requestBodySchema) continue; // GET-style endpoints have no body to fuzz
+    const cases = buildCases(op, { validCount: 1, invalidCount: iterations });
+    const label = `${op.method} ${op.path}`;
+
+    for (const c of cases) {
+      const result = validate(c.body, op.requestBodySchema.schema);
+      const expected = c.kind === "valid";
+      if (c.kind === "valid") validSeen++;
+      else invalidSeen++;
+
+      if (result.valid !== expected) {
+        issues.push(
+          `❌ ${label}: generated "${c.kind}" case was ${result.valid ? "accepted" : "rejected"} by schema (` +
+          `${result.errors.slice(0, 2).join("; ")}${result.errors.length > 2 ? "; …" : ""})`
+        );
+      }
+    }
+  }
+
+  return { issues, validSeen, invalidSeen, endpointCount: plan.length };
+}
+
+function runFuzzMode(spec, iterations) {
+  const { issues, validSeen, invalidSeen, endpointCount } =
+    runFuzzSelfTest(spec, iterations);
+
+  console.log(`\n🤖 API fuzz self-test (${iterations} invalid iterations/endpoint, ${endpointCount} endpoint(s))`);
+  console.log(`   ✓ ${validSeen} valid case(s) all satisfied their schema`);
+  console.log(`   ✓ ${invalidSeen} invalid case(s) all violated their schema`);
+
+  if (issues.length === 0) {
+    console.log(`   ✅ Fuzz generator invariants held — every labelled case is correct.\n`);
+    return 0;
+  }
+  console.log("\n" + issues.join("\n"));
+  console.log(`\n📊 ${issues.length} generator issue(s) found — fix before relying on live scans.`);
+  return 1;
+}
+
+/**
+ * Live conformance fuzz against a running backend (Workstream 4 acceptance: no
+ * 5xx for invalid input across all endpoints; response bodies conform to spec).
+ * Returns a Promise<number> exit code.
+ */
+async function runLiveMode(spec, baseUrl, iterations) {
+  const { runConformance } = require("../backend/scripts/api-fuzz/conformance.js");
+  const plan = buildPlan(spec);
+  try {
+    const result = await runConformance({
+      plan,
+      baseUrl,
+      iterations: Math.max(1, iterations),
+    });
+
+    const errors = result.violations.filter((v) => v.level === "error");
+    const warns = result.violations.filter((v) => v.level === "warn");
+    console.log(`   Sent ${result.cases} case(s) across ${result.operations} endpoint(s).`);
+    console.log(`   ⚠️  ${warns.length} warning(s), ❌ ${errors.length} error(s).\n`);
+    for (const v of result.violations) {
+      console.log(`   ${v.level === "error" ? "❌" : "⚠️"} [${v.op}] ${v.message}`);
+    }
+    return errors.length > 0 ? 1 : 0;
+  } catch (err) {
+    console.error(`\n💥 Live conformance scan failed: ${err.message}\n`);
+    return 1;
+  }
+}
+
+/**
  * Main entry point.
  */
 function main() {
   let exitCode = 0;
   const errors = [];
   let drift = { missing: [], extra: [] };
+
+  // ── CLI args (fuzz mode) ────────────────────────────────────────────────
+  const argv = process.argv.slice(2);
+  const fuzzIdx = argv.indexOf("--fuzz");
+  const liveIdx = argv.indexOf("--live");
+  const fuzzIter = fuzzIdx !== -1 ? parseInt(argv[fuzzIdx + 1], 10) || 100 : 0;
+  const liveBase = liveIdx !== -1 ? argv[liveIdx + 1] : null;
 
   console.log("\n🔍 Validating OpenAPI spec against project conventions...\n");
 
@@ -149,6 +248,19 @@ function main() {
     check429OnMutations(spec, errors);
     checkResponseDescriptions(spec, errors);
     checkOperationSummaries(spec, errors);
+
+    // Fuzz modes short-circuit after the static convention checks (they already
+    // load the spec and the offline self-test asserts generator invariants).
+    if (fuzzIdx !== -1) {
+      exitCode = runFuzzMode(spec, fuzzIter) || exitCode;
+    }
+    if (liveBase) {
+      console.log(`\n🌐 Running live conformance fuzz against ${liveBase}…\n`);
+      runLiveMode(spec, liveBase, fuzzIter).then((code) => {
+        process.exit(code || exitCode);
+      });
+      return; // async path owns exit
+    }
 
     console.log("🔎 Checking for drift between spec and Express routes...\n");
     drift = checkRouteDrift(spec);

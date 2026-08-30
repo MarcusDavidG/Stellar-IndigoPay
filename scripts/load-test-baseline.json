@@ -1,0 +1,16 @@
+{
+  "$comment": "Load-test regression baseline for Stellar-IndigoPay (#1101, Workstream 6). Updated automatically by the nightly full-load job (k6, 100 VUs for 60s). Values are p95 latency (ms) and throughput (req/s) per endpoint. Never hand-edit measured values unless doing an intentional baseline reset with reviewer sign-off.",
+  "generatedBy": "scripts/load-test.js --summary-export",
+  "scenario": "sustained (100 VUs, 60s)",
+  "updatedAt": null,
+  "endpoints": {
+    "POST /api/donations": {
+      "p95": 200.0,
+      "throughput": 60.0
+    },
+    "GET /api/analytics/*": {
+      "p95": 120.0,
+      "throughput": 30.0
+    }
+  }
+}
