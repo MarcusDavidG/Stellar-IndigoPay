@@ -157,3 +157,37 @@ groups:
       - record: business:synthetic:success_rate_1h
         expr: |
           avg_over_time(synthetic_donation_success{job="synthetic-monitor"}[1h])
+
+# ── Stellar submission health recording rules (issue #1098 W1) ───────────────
+#
+# Pre-computes rate/latency signals from the unified submission pipeline
+# metrics (indigopay_stellar_fee_bumps_total, indigopay_stellar_submit_duration_seconds)
+# so alert rules and dashboards can reference concise names. The pipeline
+# classifies failures with typed error codes (CIRCUIT_OPEN / TX_REJECTED /
+# TX_FAILED / TX_NOT_CONFIRMED / TX_TRY_AGAIN_LATER / TX_TRANSIENT_EXHAUSTED)
+# that surface in backend logs and the submit-duration histogram.
+
+  - name: indigopay-stellar-submission-recording
+    interval: 30s
+    rules:
+      # Fee-bump escalations per second — spikes indicate congestion or
+      # stalled submissions (fee-bumps are the last-resort delivery path).
+      - record: stellar:submission:fee_bumps_rate_5m
+        expr: sum(rate(indigopay_stellar_fee_bumps_total[5m]))
+
+      # p95 end-to-end submission duration (submit -> finality).
+      - record: stellar:submission:duration_p95_5m
+        expr: |
+          histogram_quantile(0.95,
+            sum(rate(indigopay_stellar_submit_duration_seconds_bucket[5m])) by (le))
+
+      # p99 end-to-end submission duration (submit -> finality).
+      - record: stellar:submission:duration_p99_5m
+        expr: |
+          histogram_quantile(0.99,
+            sum(rate(indigopay_stellar_submit_duration_seconds_bucket[5m])) by (le))
+
+      # Circuit-breaker health: 1 when any breaker is OPEN (tripped).
+      - record: stellar:circuit_breaker:any_open
+        expr: |
+          max(indigopay_soroban_circuit_breaker_state == 2)

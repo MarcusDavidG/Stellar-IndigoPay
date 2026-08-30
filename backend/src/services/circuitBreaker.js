@@ -131,6 +131,55 @@ class CircuitBreaker {
     return this.failureCount;
   }
 
+  /**
+   * Reset the breaker to a pristine CLOSED state (zero failures, no timer).
+   * Used by tests to isolate circuit behaviour between cases, and by
+   * operational tooling to manually recover a tripped breaker.
+   */
+  reset() {
+    this.state = STATES.CLOSED;
+    this.failureCount = 0;
+    this.lastFailureTime = null;
+    circuitBreakerGauge.set({ name: this.name }, STATE_VALUES[STATES.CLOSED]);
+  }
+
+  /**
+   * True when a call should fail fast WITHOUT attempting the underlying
+   * function: the breaker is OPEN and the reset (cooldown) window has NOT
+   * elapsed yet. When the window HAS elapsed the caller should proceed via
+   * `call()` so the breaker can half-open and probe recovery.
+   *
+   * Used by fail-fast pre-checks (e.g. stellar.submitTransactionSafe) that
+   * want to reject before the network without accidentally starving the
+   * half-open recovery transition.
+   *
+   * @returns {boolean}
+   */
+  shouldFailFast() {
+    if (this.state !== STATES.OPEN) return false;
+    return Date.now() - this.lastFailureTime <= this.resetTimeout;
+  }
+
+  /**
+   * Record an external failure without wrapping a function call. Used by
+   * long-lived consumers (e.g. the Horizon SSE stream in indexerService.js)
+   * whose failures arrive as callbacks rather than thrown errors.
+   *
+   * @param {Error} [err] Optional error for the failure log.
+   */
+  recordFailure(err) {
+    this._onFailure(err || new Error("recorded failure"));
+  }
+
+  /**
+   * Record an external success without wrapping a function call. Used by
+   * long-lived consumers to re-close a half-open/open breaker as soon as
+   * the downstream endpoint recovers.
+   */
+  recordSuccess() {
+    this._onSuccess();
+  }
+
   // ---------------------------------------------------------------------------
   // Internal helpers
   // ---------------------------------------------------------------------------

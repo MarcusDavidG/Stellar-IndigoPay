@@ -19,11 +19,15 @@ const analytics429Rate = new Rate("analytics_429_rate");
 //     token-burst — 5 VUs × 2 iterations simulating dashboard spikes on /api/analytics/*
 //               (token-bucket: capacity=10, refillRate=0.5)
 //     pr         — 20 VUs for 30 s (Workstream 6 regression baseline comparison)
+//     sequence-conflict — 100 VUs × 1 iteration = 100 SIMULTANEOUS donation
+//               submissions to the same project (#1098 W1 load-test acceptance:
+//               no sequence-number conflicts / no lost updates under concurrency)
 //
 // Run baseline:        k6 run scripts/load-test.js
 // Run ramp-up:         SCENARIO=ramp-up k6 run scripts/load-test.js
 // Run token-burst:     SCENARIO=token-burst k6 run scripts/load-test.js
 // Run PR-load:         SCENARIO=pr k6 run --summary-export out.json scripts/load-test.js
+// Run W1 concurrency:  SCENARIO=sequence-conflict k6 run scripts/load-test.js
 //   then compare:      node scripts/load-test-compare.js \
 //       --baseline scripts/load-test-baseline.json --current out.json --comment
 
@@ -38,7 +42,7 @@ const PR_DURATION = __ENV.PR_DURATION || "30s";
 
 // Fail fast on an unknown scenario: otherwise every scenario spread would
 // assign exec: "_noop" and the run would complete having sent zero requests.
-const VALID_SCENARIOS = ["sustained", "pr", "ramp-up", "token-burst"];
+const VALID_SCENARIOS = ["sustained", "pr", "ramp-up", "token-burst", "sequence-conflict"];
 if (!VALID_SCENARIOS.includes(SCENARIO)) {
   throw new Error(
     `Unknown SCENARIO "${SCENARIO}". Expected one of: ${VALID_SCENARIOS.join(", ")}`,
@@ -79,6 +83,18 @@ export const options = {
       maxDuration: "60s",
       startTime: "0s",
       ...(SCENARIO !== "token-burst" && { exec: "_noop" }),
+    },
+    "sequence-conflict": {
+      // 100 VUs × 1 iteration → 100 submissions fired at the same instant
+      // against the same project, the W1 money-path concurrency gate
+      // (#1098 W1: no sequence-number conflicts, no lost updates).
+      executor: "shared-iterations",
+      exec: "sequence_conflict_burst",
+      vus: 100,
+      iterations: 100,
+      maxDuration: "60s",
+      startTime: "0s",
+      ...(SCENARIO !== "sequence-conflict" && { exec: "_noop" }),
     },
   },
   thresholds: {
@@ -152,6 +168,58 @@ export default function () {
   if (!ok) donationErrors.add(1);
 
   sleep(0.5 + Math.random() * 0.5);
+}
+
+// ── W1 concurrency scenario: 100 simultaneous submissions (#1098 W1) ───────
+//
+// Fires 100 donation submissions AT THE SAME INSTANT against the same
+// project. Under a serialisable write path (advisory lock + idempotency key)
+// every submission either records exactly once or is deduplicated cleanly;
+// sequence-number conflicts / lost updates would surface as 5xx responses
+// (tx_bad_seq, TX_NOT_FOUND) or missing donationIds — both asserted here.
+//
+// Each VU uses a unique tx hash so the idempotency dedupe never collapses
+// the 100 submissions into one (the W3 idempotency-key test covers same-key
+// races; this scenario exercises distinct-write concurrency).
+
+export function sequence_conflict_burst() {
+  const donor = SAMPLE_ADDRESSES[__VU % SAMPLE_ADDRESSES.length];
+  const txHash = fakeTxHash(__VU, __ITER);
+  const amountXLM = (Math.random() * 9 + 1).toFixed(7);
+
+  const payload = JSON.stringify({
+    // All 100 VUs target the SAME project → maximum aggregate-counter contention.
+    projectId: "project-1",
+    amountXLM,
+    donorAddress: donor,
+    transactionHash: txHash,
+    memo: "sequence-conflict-load-test",
+  });
+
+  const params = {
+    headers: { "Content-Type": "application/json" },
+    tags: { endpoint: "POST /api/donations", scenario: "sequence-conflict" },
+  };
+
+  const res = http.post(`${BASE_URL}/api/donations`, payload, params);
+  donationLatency.add(res.timings.duration);
+
+  const ok = check(res, {
+    "concurrent: status is 2xx": (r) => r.status >= 200 && r.status < 300,
+    "concurrent: never a 5xx (no sequence conflicts / tx_bad_seq)": (r) =>
+      r.status < 500,
+    "concurrent: response has donationId or success": (r) => {
+      try {
+        const body = JSON.parse(r.body);
+        return !!(body.donationId ?? body.data?.id ?? body.success);
+      } catch {
+        return false;
+      }
+    },
+  });
+
+  donationSuccessRate.add(ok ? 1 : 0);
+  if (!ok) donationErrors.add(1);
 }
 
 // ── Token-bucket burst scenario: /api/analytics/* ──────────────────────────
