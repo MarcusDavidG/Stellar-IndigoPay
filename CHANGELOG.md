@@ -76,6 +76,12 @@
   - **k6 script** gains `SCENARIO=pr`, `PR_VUS`, `PR_DURATION` for lighter PR-load profiles
   - **CI:** fast fuzz self-test in the `openapi-lint` job (ci.yml); nightly full fuzz + optional live scan (`fuzz-nightly.yml`); nightly load test + baseline compare + optional PR comment (`load-test-nightly.yml`)
   - 46 new unit tests across `backend/__tests__/fuzz` and `backend/__tests__/scripts`; usage docs in `docs/quality-and-fuzzing.md`
+* **testing,contracts,frontend:** remaining workstreams of epic #1101 (formal verification, cross-contract fuzz, chaos, visual regression, synthetic donation)
+  - **Kani formal verification (WS1):** pure-function mirror harnesses prove escrow payout bounds (single + summed milestones), oracle TWAP bounds, reverse-donation accounting, global-total accumulation, badge-tier monotonicity, and attestation status-count preservation over unbounded inputs; `contracts/indigopay-contract/VERIFICATION.md` documents each harness; the `Formal Verification (Kani)` CI job in `contracts.yml` gates on `cargo kani`
+  - **Cross-contract invariant fuzzing (WS2):** `contracts/indigopay-contract/tests/cross_contract_fuzz.rs` deploys IndigoPay + oracle + native/USDC + real attestation contract and asserts global accounting invariants after every random op; `contracts/attestation-contract/src/fuzz_tests.rs` property-tests the bridge (replay guard, aggregate consistency, lifecycle accounting) — run nightly as the `Cross-Contract Fuzz` CI job
+  - **Chaos engineering (WS3):** `test/chaos/` now has 6 donation-pipeline scenarios — Redis crash, Postgres failover, Horizon 503, Soroban RPC timeout, **network partition** (`05-redis-partition.js`), and **cascading failure** (`06-cascading.js`); nightly `chaos-nightly.yml`
+  - **Visual regression (WS5):** committed Playwright screenshot baselines (`frontend/e2e/visual.spec.ts-snapshots/`) diffed against every PR by the dedicated `frontend-visual.yml` job (reviewer-gated `workflow_dispatch` regenerates baselines); `frontend/VISUAL_REGRESSION.md` documents the maintenance flow
+  - **Synthetic donation E2E monitoring (WS7):** `frontend/tests/e2e/synthetic-donation.spec.ts` runs the full wallet→donate→confirm→dashboard→leaderboard browser journey in the existing `frontend-e2e` job
 
 * **monitoring:** multi-window SLO burn-rate alerting with error budget dashboard (closes #240)
   - Defined SLOs: donation recording (99.5%) and project listing (99.9%) over 30-day rolling windows
