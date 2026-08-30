@@ -81,14 +81,18 @@ test("synthetic donation: wallet → form → confirm → dashboard → leaderbo
   );
 
   // ── Layer 7: leaderboard reflects the donor ────────────────────────────
+  // NOTE: the leaderboard has no <table>; each ranked entry renders as a `<div>`
+  // whose donor name is a link (see components/LeaderboardTable.tsx), so we
+  // assert on the donor's link by role + name rather than a table row.
   await page.goto("/leaderboard");
   await expect(page.locator("h1")).toContainText("Donor Leaderboard");
-  const donorRow = page
-    .getByRole("row")
-    .filter({ hasText: MOCK_PROFILE.displayName });
-  await expect(donorRow).toBeVisible();
+  await expect(
+    page.getByRole("link", { name: MOCK_PROFILE.displayName }),
+  ).toBeVisible();
   // Sanity-check the same donor entry the API mock returns is what's shown.
   await expect(
-    page.getByRole("row").filter({ hasText: MOCK_LEADERBOARD[0].displayName }),
+    page.getByRole("link", {
+      name: MOCK_LEADERBOARD[0].displayName,
+    }),
   ).toBeVisible();
 });
