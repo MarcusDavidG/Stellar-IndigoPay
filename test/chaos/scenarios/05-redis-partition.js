@@ -46,9 +46,8 @@ async function run() {
 
   // ── Baseline: cache writable + rate limiter healthy before the partition ──
   await h.waitForRedis();
-  const c0 = redis.getClient();
-  await c0.set("chaos:baseline", "1");
-  h.assert((await c0.get("chaos:baseline")) === "1", "cache writable before partition");
+  await redis.set("chaos:baseline", "1");
+  h.assert((await redis.get("chaos:baseline")) === "1", "cache writable before partition");
 
   const donor = h.makePublicKey("N");
   const txHash = h.makeTxHash("5");
@@ -58,21 +57,16 @@ async function run() {
   await h.waitForMarker("05.faulted");
 
   // ── Mid-partition: cache must miss (not hang / not throw) ────────────────
-  // A dropped TCP link surfaces as an ECONNRESET/ETIMEDOUT to ioredis, which
-  // the app's cache layer must convert into a cache-miss rather than a 500.
-  // We probe a few keys; each probe must resolve (never hang) and return null.
+  // A dropped TCP link surfaces as an ECONNRESET/ETIMEDOUT to the pool. The
+  // app's cache layer (`redis.get`) must swallow that into a cache-miss (null)
+  // so the money path never 500s. This is the code path under test — the raw
+  // ioredis client rejecting is expected, the cache wrapper hiding it is the
+  // resilience guarantee.
   const key = `chaos:partition:${Date.now()}`;
   let probeResult;
   let probeDurationMs = 0;
   const probeStart = Date.now();
-  try {
-    probeResult = await c0.get(key);
-  } catch (err) {
-    // Some drivers surface the unreachable peer as a rejected promise rather
-    // than null. A *propagated* error is a real bug (the money path would 500),
-    // so only accept the resolution-to-null case; anything else must fail.
-    throw new Error(`cache read raced the partition and threw instead of missing: ${err.message}`);
-  }
+  probeResult = await redis.get(key);
   probeDurationMs = Date.now() - probeStart;
   h.assert(probeResult === null, "cache read during partition resolves to a miss (no hang, no throw)");
   h.assert(probeDurationMs < 10000, `cache read did not hang (took ${probeDurationMs}ms)`);
@@ -97,9 +91,9 @@ async function run() {
 
   // ── Recovery ─────────────────────────────────────────────────────────────
   await h.waitForRedis();
-  await c0.set("chaos:post-partition", "1");
+  await redis.set("chaos:post-partition", "1");
   h.assert(
-    (await c0.get("chaos:post-partition")) === "1",
+    (await redis.get("chaos:post-partition")) === "1",
     "cache writable again after the partition healed (not poisoned)",
   );
 
