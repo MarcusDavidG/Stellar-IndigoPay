@@ -15,20 +15,20 @@ export const MOCK_PROJECT = {
     name: "Save The Trees",
     contactEmail: "info@savethetrees.org",
     website: "https://savethetrees.org",
-    country: "Brazil"
+    country: "Brazil",
   },
   co2Methodology: {
     name: "Gold Standard",
     annualTonnesCO2: "1200",
     verificationBody: "Verra",
-    documentUrl: "https://verra.org/doc"
+    documentUrl: "https://verra.org/doc",
   },
   impactMetrics: ["Trees planted: 5000", "CO2 offset: 1200t"],
   tags: ["reforestation", "carbon-offset"],
   createdAt: "2026-07-17T12:00:00Z",
   updatedAt: "2026-07-17T12:00:00Z",
   verified: true,
-  status: "active"
+  status: "active",
 };
 
 export const MOCK_PROFILE = {
@@ -37,9 +37,7 @@ export const MOCK_PROFILE = {
   bio: "Supporting global reforestation efforts",
   totalDonatedXLM: "500",
   projectsSupported: 1,
-  badges: [
-    { tier: "Seedling", earnedAt: "2026-07-16T12:00:00Z" }
-  ]
+  badges: [{ tier: "Seedling", earnedAt: "2026-07-16T12:00:00Z" }],
 };
 
 export const MOCK_DONATION = {
@@ -49,8 +47,9 @@ export const MOCK_DONATION = {
   amountXLM: "50",
   currency: "XLM",
   message: "Keep up the great work!",
-  transactionHash: "abc123def456abc123def456abc123def456abc123def456abc123def456abc1",
-  createdAt: "2026-07-17T12:00:00Z"
+  transactionHash:
+    "abc123def456abc123def456abc123def456abc123def456abc123def456abc1",
+  createdAt: "2026-07-17T12:00:00Z",
 };
 
 // Matches lib/api.ts ImpactDonorStats — kept consistent with MOCK_PROFILE
@@ -62,9 +61,27 @@ export const MOCK_IMPACT = {
   topCategory: "Reforestation",
 };
 
+// Leaderboard fixture — used by the WS7 synthetic-donation spec to verify the
+// connected donor appears as a ranked entry after a completed donation.
+export const MOCK_LEADERBOARD = [
+  {
+    rank: 1,
+    publicKey: MOCK_PROFILE.publicKey,
+    displayName: MOCK_PROFILE.displayName,
+    totalDonatedXLM: MOCK_PROFILE.totalDonatedXLM,
+    projectsSupported: MOCK_PROFILE.projectsSupported,
+  },
+];
+
 export const MOCK_ANALYTICS = {
   trends: [
-    { day: "2026-07-17", donationCount: 1, totalXLM: "50", uniqueDonors: 1, avgDonationXLM: "50" }
+    {
+      day: "2026-07-17",
+      donationCount: 1,
+      totalXLM: "50",
+      uniqueDonors: 1,
+      avgDonationXLM: "50",
+    },
   ],
   projects: [
     {
@@ -81,17 +98,34 @@ export const MOCK_ANALYTICS = {
       progressPct: 50,
       totalDonations: 10,
       lastDonationAt: "2026-07-17T12:00:00Z",
-      createdAt: "2026-07-10T12:00:00Z"
-    }
+      createdAt: "2026-07-10T12:00:00Z",
+    },
   ],
   geographic: [
-    { country: "Brazil", projectCount: 1, totalXLM: "5000", donorCount: 10, totalCO2Kg: 60000 }
+    {
+      country: "Brazil",
+      projectCount: 1,
+      totalXLM: "5000",
+      donorCount: 10,
+      totalCO2Kg: 60000,
+    },
   ],
   retention: [
-    { cohortMonth: "2026-07", cohortSize: 10, activityMonth: "2026-07", activeDonors: 8, retentionPct: 80 }
+    {
+      cohortMonth: "2026-07",
+      cohortSize: 10,
+      activityMonth: "2026-07",
+      activeDonors: 8,
+      retentionPct: 80,
+    },
   ],
   categories: [
-    { category: "Reforestation", donationCount: 10, totalXLM: "5000", donorCount: 10 }
+    {
+      category: "Reforestation",
+      donationCount: 10,
+      totalXLM: "5000",
+      donorCount: 10,
+    },
   ],
   growth: {
     summary: {
@@ -100,12 +134,12 @@ export const MOCK_ANALYTICS = {
       totalDonors: 5,
       totalXLM: "5000",
       activeDonors30d: 4,
-      totalXLM30d: "3000"
+      totalXLM30d: "3000",
     },
     monthlyGrowth: [
-      { month: "2026-07", donations: 10, "totalXLM": "5000", donors: 5 }
-    ]
-  }
+      { month: "2026-07", donations: 10, totalXLM: "5000", donors: 5 },
+    ],
+  },
 };
 
 /**
@@ -119,8 +153,10 @@ export async function mockApi(page: Page) {
         status: 200,
         headers: {
           "Access-Control-Allow-Origin": "*",
-          "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
-          "Access-Control-Allow-Headers": "Content-Type, Authorization, X-CSRF-Token, X-Admin-Key, Idempotency-Key",
+          "Access-Control-Allow-Methods":
+            "GET, POST, PUT, PATCH, DELETE, OPTIONS",
+          "Access-Control-Allow-Headers":
+            "Content-Type, Authorization, X-CSRF-Token, X-Admin-Key, Idempotency-Key",
           "Access-Control-Allow-Credentials": "true",
         },
       });
@@ -233,7 +269,7 @@ export async function mockApi(page: Page) {
         contentType: "application/json",
         body: JSON.stringify({
           success: true,
-          data: { token: "mock-admin-token", expiresIn: 3600 }
+          data: { token: "mock-admin-token", expiresIn: 3600 },
         }),
       });
     }
@@ -247,7 +283,7 @@ export async function mockApi(page: Page) {
       contentType: "application/json",
       body: JSON.stringify({
         success: true,
-        data: { token: "mock-admin-token", expiresIn: 3600 }
+        data: { token: "mock-admin-token", expiresIn: 3600 },
       }),
     });
   });
@@ -319,6 +355,15 @@ export async function mockApi(page: Page) {
     });
   });
 
+  // Leaderboard (WS7 synthetic-donation: the donor must appear after donating)
+  await page.route("**/api/v1/leaderboard*", (route: Route) => {
+    return route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ success: true, data: MOCK_LEADERBOARD }),
+    });
+  });
+
   // Global platform stats
   await page.route("**/api/v1/stats/global*", (route: Route) => {
     return route.fulfill({
@@ -331,8 +376,8 @@ export async function mockApi(page: Page) {
           totalCO2OffsetKg: 180000,
           totalDonations: 300,
           totalProjects: 5,
-          totalDonors: 120
-        }
+          totalDonors: 120,
+        },
       }),
     });
   });
@@ -346,8 +391,8 @@ export async function mockApi(page: Page) {
         success: true,
         data: [
           { category: "Reforestation", count: 3 },
-          { category: "Solar Energy", count: 2 }
-        ]
+          { category: "Solar Energy", count: 2 },
+        ],
       }),
     });
   });
