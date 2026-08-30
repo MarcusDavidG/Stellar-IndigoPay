@@ -82,4 +82,10 @@ services:
       - ./scripts:/scripts:ro
       - ./docs:/docs:ro
       - ./backend/src:/backend/src:ro
+      # API-fuzz toolchain lives under backend/scripts/api-fuzz and is required by
+      # the repo-root scripts/validate-openapi.js (fuzz self-test / live conformance).
+      # The backend image carries these under /app, but the script resolves them
+      # relative to /scripts, so they must be mounted at /backend/scripts like the
+      # other repo-root-relative siblings above.
+      - ./backend/scripts:/backend/scripts:ro
     command: sh -c "npm run db:migrate && npm test"

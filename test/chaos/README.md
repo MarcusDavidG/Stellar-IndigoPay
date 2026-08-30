@@ -15,12 +15,19 @@ fault-injecting Horizon + Soroban RPC stub.
 | 02 | Postgres container stopped/restarted during donation | Donation fails cleanly with zero partial writes; the connection pool recovers; re-submitting the same tx hash is idempotent — **no double-records**, totals unchanged |
 | 03 | Horizon + Soroban RPC answer HTTP 503 | Donation fails cleanly (no fake data); the recurring keeper cycle degrades gracefully and preserves the due schedule (**no data loss**); `withRetry` retries with exponential backoff and the shared circuit breaker opens; after recovery the same donation records (**eventual recording**), replays don't double-record, and the breaker returns to CLOSED |
 | 04 | Soroban RPC delays then fails (timeout stand-in) | Transient failures are retried with backoff; sustained timeouts trip the circuit breaker (calls fast-fail while OPEN); after the fault clears the same call succeeds (**eventual success**) and the breaker closes |
+| 05 | **Network partition** — host severs the docker-network link to Redis (`docker network disconnect`, process stays up) | Cache reads degrade to misses (never hang, never throw); the rate limiter falls back to its in-memory gate so a donation during the partition neither 500s nor is throttled on stale state; after reconnection Redis is reachable again and not poisoned |
+| 06 | **Cascading failure** — Redis *and* Postgres stopped simultaneously + Horizon 503 | The system reaches a degraded-but-**functional** state (requests rejected cleanly, app still responsive); after the faults clear every component recovers **independently** with **zero data loss / zero double-records** (the same tx hash records exactly once on replay) |
+
+Scenarios 01, 02, 05, and 06 satisfy the donation-pipeline resilience
+scenarios of issue **#1101, Workstream 3** (Redis crash mid-spike, PostgreSQL
+failover, network partition, and cascading failure); scenarios 03 and 04 cover
+the Horizon / Soroban RPC fault-injection legs of the same pipeline.
 
 ## How it works
 
 ```
 test/chaos/
-├── driver.js            # in-container runner: executes the 4 scenarios, writes summary.json
+├── driver.js            # in-container runner: executes the 6 scenarios, writes summary.json
 ├── run-chaos.sh         # host orchestrator: topology up/down + Redis/Postgres crash injection
 ├── lib/harness.js       # markers, stub fault API, DB seeding, recordDonation shim
 ├── scenarios/           # one file per scenario (see table above)
@@ -48,6 +55,11 @@ Fault coordination:
   `docker compose stop <service>`; the driver asserts mid-fault behaviour,
   writes `NN.during`; the host runs `docker compose start <service>` and
   writes `NN.recovered`; the driver asserts recovery.
+- **Scenario 05** — the host severs the Redis container's docker-network link
+  (`docker network disconnect`) instead of stopping it, so the Redis process
+  stays up but is unreachable — a true partition.
+- **Scenario 06** — the host stops Redis *and* Postgres together (cascade),
+  then starts both.
 - **Scenarios 03/04** — the driver injects faults itself through the stub's
   admin API (`POST /__chaos/fault { target, mode: "503"|"timeout" }`), so no
   host involvement is needed.

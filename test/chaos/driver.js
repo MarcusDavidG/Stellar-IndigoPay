@@ -8,7 +8,10 @@
  *
  * Scenarios 01-02 coordinate with the host (run-chaos.sh) via marker files
  * in /chaos-run so the host can crash/restart Redis and Postgres with
- * `docker compose stop|start`. Scenarios 03-04 inject faults themselves via
+ * `docker compose stop|start`. Scenario 05 coordinates a host-injected
+ * network partition (the host severs the Redis container's docker-network
+ * link), and scenario 06 coordinates a host-injected cascade (both Redis and
+ * Postgres stopped at once). Scenarios 03-04 inject faults themselves via
  * the chaos-stub's admin API.
  */
 "use strict";
@@ -22,6 +25,8 @@ const scenarios = [
   { id: "02", name: "pg-failover", file: "./scenarios/02-pg-failover" },
   { id: "03", name: "horizon-outage", file: "./scenarios/03-horizon-outage" },
   { id: "04", name: "soroban-timeout", file: "./scenarios/04-soroban-timeout" },
+  { id: "05", name: "redis-partition", file: "./scenarios/05-redis-partition" },
+  { id: "06", name: "cascading", file: "./scenarios/06-cascading" },
 ];
 
 async function main() {
