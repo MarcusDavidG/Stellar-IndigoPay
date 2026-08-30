@@ -36,6 +36,15 @@ const PR_LOAD = __ENV.PR_LOAD === "1" || SCENARIO === "pr";
 const PR_VUS = Number(__ENV.PR_VUS || 20);
 const PR_DURATION = __ENV.PR_DURATION || "30s";
 
+// Fail fast on an unknown scenario: otherwise every scenario spread would
+// assign exec: "_noop" and the run would complete having sent zero requests.
+const VALID_SCENARIOS = ["sustained", "pr", "ramp-up", "token-burst"];
+if (!VALID_SCENARIOS.includes(SCENARIO)) {
+  throw new Error(
+    `Unknown SCENARIO "${SCENARIO}". Expected one of: ${VALID_SCENARIOS.join(", ")}`,
+  );
+}
+
 export const options = {
   scenarios: {
     sustained: {

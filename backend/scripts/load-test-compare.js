@@ -42,12 +42,13 @@ function thresholds(overrides = {}) {
 }
 
 /**
- * Extract a numeric percentile from a k6 `values` object.
- * `values[metricName]` — e.g. values.p95.
+ * Extract a numeric percentile from a k6 Trend `values` object. k6 summary
+ * exports emit percentile keys in the `p(95)` form (not `p95`); accept both so
+ * hand-built fixtures and any future format keep working.
  */
-function percentile(values, name) {
+function percentile(values, number) {
   if (!values || typeof values !== "object") return null;
-  const v = values[name];
+  const v = values[`p(${number})`] ?? values[`p${number}`];
   if (typeof v === "number" && Number.isFinite(v)) return v;
   return null;
 }
@@ -76,15 +77,7 @@ function parseK6Summary(raw) {
   const result = {};
   if (!raw || !raw.metrics || typeof raw.metrics !== "object") return result;
 
-  const metrics = raw.metrics;
-  const durationSeconds =
-    metricValue(metrics, "iteration_duration") || metricValue(metrics, "vus");
-  const runTime =
-    durationSeconds && typeof metrics["iteration_duration"] === "object"
-      ? metrics["iteration_duration"].values.duration
-      : null;
-
-  for (const [key, metric] of Object.entries(metrics)) {
+  for (const [key, metric] of Object.entries(raw.metrics)) {
     if (!metric || typeof metric !== "object") continue;
     const tags = metric.tags || {};
     const endpoint = tags.endpoint || globalKeyEndpoint(key);
@@ -99,27 +92,26 @@ function parseK6Summary(raw) {
 
     if (key.startsWith("http_req_duration")) {
       const values = metric.values || {};
-      entry.p50 = percentile(values, "p50");
-      entry.p95 = percentile(values, "p95");
-      entry.p99 = percentile(values, "p99");
+      entry.p50 = percentile(values, 50);
+      entry.p95 = percentile(values, 95);
+      entry.p99 = percentile(values, 99);
     } else if (key.startsWith("http_reqs")) {
-      const count = (metric.values && metric.values.count) || 0;
-      // Chicken-filter: only fill throughput when we actually have a runtime.
+      // k6 exports throughput for a metric in `values.rate` (requests/second).
+      // Falling back to the raw counter keeps tolerant fixtures working.
+      const values = metric.values || {};
+      const rate = values.rate;
       entry.throughput =
-        runTime && runTime > 0 ? count / (runTime / 1000) : null;
+        typeof rate === "number" && Number.isFinite(rate)
+          ? rate
+          : typeof values.count === "number"
+            ? values.count
+            : null;
     }
 
     result[endpoint] = entry;
   }
 
   return result;
-}
-
-function metricValue(metrics, name) {
-  const m = metrics[name];
-  return m && typeof m === "object" && typeof m.values === "object"
-    ? m.values
-    : null;
 }
 
 function globalKeyEndpoint(key) {
@@ -177,8 +169,9 @@ function compareEndpoint(endpoint, current, baselineEndpoint, th) {
       ((curThroughput - baseThroughput) / baseThroughput) * 100;
   }
 
-  // Merge-blocking conditions
-  const hardThresholdBreach = curP95 != null && curP95 > th.hardLatencyMs;
+  // Merge-blocking conditions. The hard gate mirrors scripts/load-test.js's
+  // `p(95)<500` (strictly less than), so exactly 500ms must block → use >=.
+  const hardThresholdBreach = curP95 != null && curP95 >= th.hardLatencyMs;
   const latencyBlock =
     curP95 != null &&
     baseP95 != null &&

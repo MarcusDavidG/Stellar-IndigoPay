@@ -63,13 +63,13 @@ describe("parseK6Summary", () => {
   test("extracts per-endpoint p50/p95/p99 from k6 summary-export JSON", () => {
     const raw = {
       metrics: {
-        http_req_duration: { values: { p50: 82, p95: 210 } },
+        http_req_duration: { values: { "p(50)": 82, "p(95)": 210 } },
         "http_req_duration{endpoint:POST /api/donations}": {
-          values: { p50: 80, p95: 220, p99: 400 },
+          values: { "p(50)": 80, "p(95)": 220, "p(99)": 400 },
           tags: { endpoint: "POST /api/donations" },
         },
         "http_req_duration{endpoint:GET /api/leaderboard}": {
-          values: { p50: 12, p95: 30, p99: 55 },
+          values: { "p(50)": 12, "p(95)": 30, "p(99)": 55 },
           tags: { endpoint: "GET /api/leaderboard" },
         },
       },
@@ -90,24 +90,36 @@ describe("parseK6Summary", () => {
     expect(out["http_req_duration"]).toBeUndefined(); // global metric has no endpoint tag
   });
 
-  test("computes throughput from http_reqs count and iteration_duration", () => {
+  test("reads throughput from http_reqs.values.rate (k6 requests-per-second)", () => {
     const raw = {
       metrics: {
-        iteration_duration: { values: { duration: 60000 } }, // 60s
         "http_reqs{endpoint:POST /api/donations}": {
-          values: { count: 300 },
+          values: { rate: 300, count: 600 },
           tags: { endpoint: "POST /api/donations" },
         },
         "http_req_duration{endpoint:POST /api/donations}": {
-          values: { p95: 100 },
+          values: { "p(95)": 100 },
           tags: { endpoint: "POST /api/donations" },
         },
       },
     };
     const out = parseK6Summary(raw);
     expect(out["POST /api/donations"].p95).toBe(100);
-    // 300 requests / 60s = 5 req/s
-    expect(out["POST /api/donations"].throughput).toBeCloseTo(5, 5);
+    // rate is already in requests/second
+    expect(out["POST /api/donations"].throughput).toBe(300);
+  });
+
+  test("falls back to the counter when a rate is absent", () => {
+    const raw = {
+      metrics: {
+        "http_reqs{endpoint:GET /api/leaderboard}": {
+          values: { count: 42 },
+          tags: { endpoint: "GET /api/leaderboard" },
+        },
+      },
+    };
+    const out = parseK6Summary(raw);
+    expect(out["GET /api/leaderboard"].throughput).toBe(42);
   });
 
   test("does not explode on missing metrics or malformed input", () => {
@@ -120,7 +132,7 @@ describe("parseK6Summary", () => {
     const raw = {
       metrics: {
         "http_req_duration{endpoint:GET /api/stats/global}": {
-          values: { p95: 88 },
+          values: { "p(95)": 88 },
         },
       },
     };
@@ -191,6 +203,14 @@ describe("compareBaseline", () => {
   test("blocks when p95 exceeds the 500ms hard gate even with no baseline", () => {
     const baseline = makeBaseline({});
     const current = makeCurrent({ "POST /api/donations": { p95: 620 } });
+    const res = compareBaseline({ baseline, current });
+    expect(res.blocked).toBe(true);
+    expect(res.rows[0].hardThresholdBreach).toBe(true);
+  });
+
+  test("blocks when p95 is exactly 500ms (hard gate is p(95)<500)", () => {
+    const baseline = makeBaseline({});
+    const current = makeCurrent({ "POST /api/donations": { p95: 500 } });
     const res = compareBaseline({ baseline, current });
     expect(res.blocked).toBe(true);
     expect(res.rows[0].hardThresholdBreach).toBe(true);
