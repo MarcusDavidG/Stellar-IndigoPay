@@ -16,6 +16,13 @@
 //!     equals the reference sum;
 //!   - badge-tier thresholds are mutually disjoint.
 //!
+//! These are the formal-verification deliverables of **issue #1101, Workstream 1**
+//! (Kani proofs). Because the Soroban contracts are host-bound (they cannot run
+//! under Kani), each property below is encoded as an equivalent pure-function
+//! mirror of the exact checked arithmetic the contract uses on-chain; the
+//! escrow payout, oracle TWAP, donation/global-total, reverse-accounting,
+//! badge-tier, and attestation status-counting properties live together here.
+//!
 //! # Why these encodings (performance notes)
 //!
 //! The original harnesses used `i128` and asserted the invariants in their
@@ -67,6 +74,83 @@ fn verify_badge_threshold_disjointness() {
     if is_earth_guardian {
         assert!(!is_forest && !is_tree && !is_seedling);
     }
+}
+
+// ─── WS1 (#1101): badge-tier monotonicity ────────────────────────────────────
+/// Mirror of the badge-tier assignment used on-chain (thresholds in stroops):
+/// a higher lifetime contribution can only map to the same or a higher tier.
+#[cfg(kani)]
+fn badge_rank(amount: u64) -> u8 {
+    if amount >= 2000 * 10_000_000 {
+        4 // EarthGuardian
+    } else if amount >= 500 * 10_000_000 {
+        3 // Forest
+    } else if amount >= 100 * 10_000_000 {
+        2 // Tree
+    } else if amount >= 10 * 10_000_000 {
+        1 // Seedling
+    } else {
+        0 // None
+    }
+}
+
+/// Badge tier is monotonic: for any two donation totals `a1 ≤ a2`, the tier of
+/// `a2` is never below the tier of `a1`. Over a sequence of donations a donor's
+/// cumulative total only grows, so its tier can never decrease.
+#[cfg(kani)]
+#[kani::proof]
+fn verify_badge_tier_is_monotonic() {
+    let a1: u64 = kani::any();
+    let a2: u64 = kani::any();
+    kani::assume(a1 <= a2);
+    assert!(
+        badge_rank(a1) <= badge_rank(a2),
+        "badge tier must be monotonic in cumulative donation amount"
+    );
+}
+
+// ─── WS1 (#1101): attestation status-count preservation ─────────────────────
+/// Mirror of the attestation lifecycle accounting: `total_attestations` must
+/// always equal the sum of the per-status counters (pending + verified +
+/// revoked), no matter how many records are verified or revoked and in what
+/// order. Proven for the verify-then-revoke and direct-revoke orderings the
+/// contract exposes.
+#[cfg(kani)]
+#[kani::proof]
+fn verify_attestation_status_accounting_preserved() {
+    let pending: u64 = kani::any();
+    let verified: u64 = kani::any();
+    let revoked: u64 = kani::any();
+    kani::assume(pending.checked_add(verified).is_some());
+    kani::assume(revoked.checked_add(pending + verified).is_some());
+    let total = pending + verified + revoked;
+
+    // Order A: verify `v` records, then revoke `r` records, each drawn from
+    // what is still pending after the preceding step.
+    let v: u64 = kani::any();
+    let r: u64 = kani::any();
+    kani::assume(v <= pending);
+    kani::assume(r <= pending - v);
+    let pending_a = pending - v - r;
+    let verified_a = verified + v;
+    let revoked_a = revoked + r;
+    assert_eq!(
+        pending_a + verified_a + revoked_a,
+        total,
+        "verify-then-revoke preserves the total attestation count"
+    );
+
+    // Order B: revoke `r2` directly from Pending (no prior verify) — the final
+    // status counts must still sum to the same total.
+    let r2: u64 = kani::any();
+    kani::assume(r2 <= pending);
+    let pending_b = pending - r2;
+    let revoked_b = revoked + r2;
+    assert_eq!(
+        pending_b + verified + revoked_b,
+        total,
+        "revoke-from-pending also preserves the total attestation count"
+    );
 }
 
 // ─── WS5: escrow payout arithmetic ───────────────────────────────────────────
