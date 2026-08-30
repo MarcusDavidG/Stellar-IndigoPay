@@ -5,6 +5,7 @@ This document covers two companion workstreams from
 
 - **Workstream 4 — API fuzz testing with automatic OpenAPI schema conformance.**
 - **Workstream 6 — Load-test regression detection with k6 baseline comparison.**
+- **Workstream 2 — Cross-chain contract fuzz property tests (attestation bridge).**
 
 Both are tooling around the same machine-verified quality goal: a PR can no longer
 merge a schema-violating `5xx`-on-garbage-input bug, or a performance regression
@@ -110,6 +111,34 @@ node scripts/load-test-compare.js \
 - `.github/workflows/load-test-nightly.yml` — nightly k6 run + baseline compare,
   optional PR comment (`workflow_dispatch` with `pr_number`), fails on blocking
   regressions. Benchmark/compare unit tests run in the backend jest suite.
+
+---
+
+## Workstream 2 — Cross-chain attestation fuzz property tests
+
+The Soroban side of the epic already ships a deep integration fuzz harness
+(`contracts/indigopay-contract/tests/cross_contract_fuzz.rs`, run nightly as the
+"Cross-Contract Fuzz (WS5)" CI job) that deploys IndigoPay together with the
+oracle, native/USDC assets, and the real **attestation contract**, driving
+register/donate/attest/settle sequences.
+
+WS2's contribution here fills the attestation contract's previously **empty**
+`fuzz_tests.rs` placeholder with property tests for the _bridge_ half of the
+ledger — a donor on a non-Stellar source chain recorded as an attestation:
+
+1. **Aggregate consistency** — per-donor and per-chain roll-up counters exactly
+   mirror the sum of individual attestations across mixed single/batch records.
+2. **Replay guard** — recording the same `(source_chain, source_tx_hash)` twice
+   always panics and never mutates the ledger twice.
+3. **Lifecycle accounting** — verify/revoke produce the same final status counts
+   (pending/verified/revoked still sum to total) whether executed as
+   verify-then-revoke or directly from pending.
+
+Run locally:
+
+```bash
+cd contracts && cargo test --features testutils -p attestation-contract -- fuzz
+```
 
 ---
 
