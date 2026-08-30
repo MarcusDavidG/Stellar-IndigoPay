@@ -12,7 +12,13 @@ import type { Page, Route } from "@playwright/test";
  * origin.
  */
 function corsHeaders(origin: string | undefined): Record<string, string> {
-  const headers: Record<string, string> = { Vary: "Origin" };
+  const headers: Record<string, string> = {
+    Vary: "Origin",
+    // lib/api.ts always sends `withCredentials: true`, so every mocked response
+    // must echo this back — without it the browser rejects credentialed
+    // cross-origin responses even when Allow-Origin echoes the exact origin.
+    "Access-Control-Allow-Credentials": "true",
+  };
   if (origin) headers["Access-Control-Allow-Origin"] = origin;
   return headers;
 }
