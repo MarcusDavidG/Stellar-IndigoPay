@@ -38,9 +38,6 @@
  *     - Verifiers must accept any valid version in the list (logical OR).
  *     - Unknown versions (v3+) are rejected with UNKNOWN_VERSION.
  *     - After the transition window, v1 is dropped from outbound headers.
- *   The `LEGACY_ACCEPT_UNTIL` mechanism below handles the reverse
- *   direction: accepting legacy clients that send unversioned content
- *   during the documented transition window.
  *
  * Error codes
  * ───────────
@@ -161,9 +158,14 @@ function computeEventId(input) {
  * @returns {string}
  */
 function sign(body, secret, timestamp) {
+  if (!Number.isSafeInteger(timestamp)) {
+    throw new TypeError("sign: timestamp must be a safe integer");
+  }
+  const prefix = Buffer.from(`${timestamp}.`, "utf8");
+  const bodyBuf = Buffer.isBuffer(body) ? body : Buffer.from(String(body), "utf8");
   const mac = crypto
     .createHmac("sha256", secret)
-    .update(`${timestamp}.${body}`)
+    .update(Buffer.concat([prefix, bodyBuf]))
     .digest("hex");
   return `t=${timestamp},v1=${mac}`;
 }
@@ -198,32 +200,53 @@ function verifyWithReason(
   }
 
   // ── Timestamp ──────────────────────────────────────────────────────────
-  const t = Number.parseInt(parts.t, 10);
-  if (!Number.isFinite(t) || parts.t === undefined || parts.t === "") {
+  const rawT = parts.t;
+  if (typeof rawT !== "string" || rawT.length === 0) {
+    return { ok: false, reason: VerifyReason.MISSING_T };
+  }
+  if (!/^-?\d+$/.test(rawT)) {
+    return { ok: false, reason: VerifyReason.MISSING_T };
+  }
+  const t = Number(rawT);
+  if (!Number.isSafeInteger(t)) {
     return { ok: false, reason: VerifyReason.MISSING_T };
   }
 
-  // ── Algorithm version presence ─────────────────────────────────────────
-  // Check that at least one recognised version key is present before
-  // doing any HMAC work (fail-closed on unknown versions).
-  const presentVersions = SUPPORTED_VERSIONS.filter((v) => parts[v] !== undefined && parts[v] !== "");
-  if (presentVersions.length === 0) {
-    return { ok: false, reason: VerifyReason.UNKNOWN_VERSION };
-  }
-
   // ── v1 specifically required ────────────────────────────────────────────
-  const v1 = parts.v1;
-  if (typeof v1 !== "string" || v1.length === 0) {
+  // Check v1 presence/emptiness before the generic unknown-version check so
+  // both an empty v1 value and a bare v1 token correctly return MISSING_V1.
+  if (Object.prototype.hasOwnProperty.call(parts, "v1")) {
+    const v1val = parts.v1;
+    if (typeof v1val !== "string" || v1val.length === 0) {
+      return { ok: false, reason: VerifyReason.MISSING_V1 };
+    }
+  } else if (!Object.prototype.hasOwnProperty.call(parts, "v1")) {
+    // No v1 key at all — check if any recognised version present
+    const presentVersions = SUPPORTED_VERSIONS.filter((v) => parts[v] !== undefined && parts[v] !== "");
+    if (presentVersions.length === 0) {
+      return { ok: false, reason: VerifyReason.UNKNOWN_VERSION };
+    }
     return { ok: false, reason: VerifyReason.MISSING_V1 };
   }
 
+  const v1 = parts.v1;
+
   // ── Replay window ───────────────────────────────────────────────────────
+  if (!Number.isFinite(replayWindowSeconds) || replayWindowSeconds < 0) {
+    return { ok: false, reason: VerifyReason.MALFORMED };
+  }
+  if (!Number.isFinite(now) || !Number.isSafeInteger(now)) {
+    return { ok: false, reason: VerifyReason.MALFORMED };
+  }
   if (Math.abs(now - t) > replayWindowSeconds) {
     return { ok: false, reason: VerifyReason.STALE };
   }
 
   // ── HMAC ────────────────────────────────────────────────────────────────
-  const message = `${t}.${body}`;
+  // Preserve raw Buffer bytes: HMAC over <timestamp>.<body> where body bytes are exact.
+  const prefix = Buffer.from(`${t}.`, "utf8");
+  const bodyBuf = Buffer.isBuffer(body) ? body : Buffer.from(String(body), "utf8");
+  const message = Buffer.concat([prefix, bodyBuf]);
   if (!hmacEquals(message, secret, v1)) {
     return { ok: false, reason: VerifyReason.MISMATCH };
   }

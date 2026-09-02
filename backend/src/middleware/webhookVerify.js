@@ -72,9 +72,14 @@ function webhookVerify(options = {}) {
     throw new TypeError("webhookVerify: options.getSecret must be a function");
   }
 
-  const replayWindowSeconds =
-    options.replayWindowSeconds ??
-    Number(process.env.WEBHOOK_REPLAY_WINDOW_SECONDS || DEFAULT_REPLAY_WINDOW_SECONDS);
+  let replayWindowSeconds = options.replayWindowSeconds;
+  if (replayWindowSeconds === undefined) {
+    const envVal = process.env.WEBHOOK_REPLAY_WINDOW_SECONDS;
+    replayWindowSeconds = envVal !== undefined && envVal !== "" ? Number(envVal) : DEFAULT_REPLAY_WINDOW_SECONDS;
+  }
+  if (!Number.isFinite(replayWindowSeconds) || replayWindowSeconds < 0) {
+    throw new TypeError("webhookVerify: replayWindowSeconds must be a non-negative finite number");
+  }
 
   return async function webhookVerifyMiddleware(req, res, next) {
     const signatureHeader = req.get("x-webhook-signature");
@@ -105,15 +110,23 @@ function webhookVerify(options = {}) {
       return res.status(500).json({ error: "webhook secret not configured" });
     }
 
-    // Body must be raw bytes/string. express.raw() gives a Buffer; toString()
-    // gives the UTF-8 string that was signed.
+    // Body must be raw bytes/string. express.raw() gives a Buffer which is
+    // preserved exactly; string is passed through; parsed objects are
+    // rejected fail-closed (they would produce a different HMAC than raw bytes).
     let rawBody;
     if (Buffer.isBuffer(req.body)) {
-      rawBody = req.body.toString("utf8");
+      rawBody = req.body;
     } else if (typeof req.body === "string") {
       rawBody = req.body;
     } else {
-      rawBody = JSON.stringify(req.body);
+      logger.warn(
+        { event: "webhook_verify_bad_body_type", bodyType: typeof req.body },
+        "webhookVerify: request body is not Buffer or string — rejecting",
+      );
+      return res
+        .status(400)
+        .set("X-Webhook-Signature-Reason", VerifyReason.MALFORMED)
+        .json({ error: "webhook body must be raw bytes (use express.raw())", reason: VerifyReason.MALFORMED });
     }
 
     const now = Math.floor(Date.now() / 1000);

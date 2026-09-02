@@ -586,4 +586,155 @@ mod fuzz {
             prop_assert_eq!(sum, fee_amount, "Sum of recipient fee shares must equal total fee amount");
         }
     }
+
+    // ─── WS2: cross-project / global invariant fuzzing (epic #1101) ────────
+    //
+    // The earlier property tests only exercise a single project, so they can
+    // only ever assert `global_total == project.total_raised` (a tautology for
+    // one project). These harnesses drive random donations across multiple
+    // registered projects and assert the *cross-shard* invariants the soroban
+    // state machine must maintain across boundaries:
+    //
+    //   - GlobalTotalRaised == Σ(project.total_raised) across all projects;
+    //   - DonationCount == exact number of DonationRecord entries created.
+    //
+    // `mock_all_auths()` bypasses admin auth so a second project can be
+    // registered deterministically (mirrors the production admin path).
+
+    /// Deterministic splitmix64 — reproducible cross-project sequences.
+    fn next_splitmix(state: &mut u64) -> u64 {
+        *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15u64);
+        let mut z = *state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9u64);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EBu64);
+        z ^ (z >> 31)
+    }
+
+    /// Read the initialized M-of-N admin set and return its first admin — the
+    /// address `setup` created when it called `initialize`. Used because
+    /// `register_project` enforces `require_admin_for_routine`, so a *fresh*
+    /// generated address is not an authorized admin.
+    fn first_admin(env: &Env, cid: &Address) -> Address {
+        env.as_contract(cid, || {
+            env.storage()
+                .instance()
+                .get::<_, soroban_sdk::Vec<Address>>(&crate::DataKey::AdminSet)
+                .expect("admin set initialized")
+                .get(0)
+                .expect("at least one admin")
+        })
+    }
+
+    /// Register a second project on the same contract as an initialized admin.
+    /// Returns its ID for the donating client.
+    fn register_second_project(
+        client: &IndigoPayContractClient<'static>,
+        env: &Env,
+        cid: &Address,
+        project_id_str: &str,
+    ) -> SorobanString {
+        let pid = SorobanString::from_str(env, project_id_str);
+        let admin = first_admin(env, cid);
+        client.register_project(
+            &admin,
+            &pid,
+            &SorobanString::from_str(env, "Second Fuzz Project"),
+            &Address::generate(env),
+            &50u32,
+        );
+        pid
+    }
+
+    /// Deterministic: a mixed 10-donation sequence across two projects must
+    /// keep the global counter equal to the sum of per-project totals and the
+    /// donation counter equal to the number of donations executed.
+    #[test]
+    fn ws2_global_invariant_holds_across_multiple_projects() {
+        let (env, cid, client, _wallet, p1, token) = setup();
+        let p2 = register_second_project(&client, &env, &cid, "proj-fuzz-2");
+
+        let mut expected_total: i128 = 0;
+        let mut expected_donations: u32 = 0;
+        let mut rng = 1u64;
+
+        for _ in 0..10 {
+            let donor = Address::generate(&env);
+            let amount = ((next_splitmix(&mut rng) % (MAX_DONATION as u64)) as i128) + 1;
+            let to_p1 = (next_splitmix(&mut rng) & 1) == 0;
+            mint_tokens(&env, &token, &donor, amount);
+            client.donate(
+                &token,
+                &donor,
+                if to_p1 { &p1 } else { &p2 },
+                &amount,
+                &42u32,
+            );
+            expected_total += amount;
+            expected_donations += 1;
+        }
+
+        let global = client.get_global_total();
+        let sum_projects = client
+            .get_project(&p1)
+            .total_raised
+            .checked_add(client.get_project(&p2).total_raised)
+            .expect("project totals sum");
+
+        assert_eq!(
+            global, sum_projects,
+            "GlobalTotalRaised == Σ(project.total_raised)"
+        );
+        assert_eq!(
+            global, expected_total,
+            "global counter tracks all donations"
+        );
+        assert_eq!(
+            client.get_donation_count(),
+            expected_donations,
+            "DonationCount == number of DonationRecord entries"
+        );
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(500))]
+
+        /// Random amounts split across two projects must preserve the global
+        /// invariant (`global == Σ(project totals)`) and the donation count.
+        #[test]
+        fn ws2_multi_project_global_invariant(
+            a in 1i128..=(MAX_DONATION / 4),
+            b in 1i128..=(MAX_DONATION / 4),
+            c in 1i128..=(MAX_DONATION / 4),
+            d in 1i128..=(MAX_DONATION / 4),
+        ) {
+            let (env, cid, client, _wallet, p1, token) = setup();
+            let p2 = register_second_project(&client, &env, &cid, "proj-fuzz-2");
+
+            for (donor_amt, to_p1) in [(a, true), (b, false), (c, true), (d, false)] {
+                let donor = Address::generate(&env);
+                mint_tokens(&env, &token, &donor, donor_amt);
+                client.donate(
+                    &token,
+                    &donor,
+                    if to_p1 { &p1 } else { &p2 },
+                    &donor_amt,
+                    &42u32,
+                );
+            }
+
+            let global = client.get_global_total();
+            let sum_projects = client
+                .get_project(&p1)
+                .total_raised
+                .checked_add(client.get_project(&p2).total_raised)
+                .expect("project totals sum");
+            prop_assert_eq!(global, sum_projects, "global == Σ(project totals)");
+            prop_assert_eq!(global, a + b + c + d, "global == sum of donations");
+            prop_assert_eq!(
+                client.get_donation_count(),
+                4u32,
+                "donation count == donations executed"
+            );
+        }
+    }
 }

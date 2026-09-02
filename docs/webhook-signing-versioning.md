@@ -18,7 +18,7 @@ the header and must be present for a signature to be accepted.
 
 ## Header format
 
-```
+```text
 X-Webhook-Signature: t=<unix>,v1=<hex hmac-sha256>
 ```
 
@@ -38,7 +38,7 @@ The header is a comma-separated list of `k=v` pairs. Parsers must:
 |------|-------------|---------|
 | `OK` | — | Signature valid |
 | `MALFORMED` | 400 | Header absent, empty, or not parseable |
-| `MISSING_T` | 400 | `t=` field absent or not a finite integer |
+| `MISSING_T` | 400 | `t=` field absent or not a finite safe integer (exact decimal) |
 | `MISSING_V1` | 400 | `v1=` field absent or empty |
 | `UNKNOWN_VERSION` | 403 | Header contains no recognised version prefix |
 | `STALE` | 408 | Timestamp outside the replay window (clock skew or replay) |
@@ -65,7 +65,7 @@ When a new algorithm becomes necessary (e.g. migration away from HMAC-SHA256):
 
 The server begins emitting **both** v1 and v2 in every outbound signature:
 
-```
+```text
 X-Webhook-Signature: t=<unix>,v1=<hex-hmac-sha256>,v2=<new-algo-output>
 ```
 
@@ -101,7 +101,7 @@ If the partner ecosystem adopts an `Accept-Signature` request header
 (analogous to `Accept` for content negotiation), receivers could advertise
 which versions they support:
 
-```
+```text
 Accept-Signature: v1, v2
 ```
 

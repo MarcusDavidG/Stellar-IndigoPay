@@ -14,6 +14,7 @@ const {
   server: stellarServer,
   NETWORK_PASSPHRASE,
   submitTransaction,
+  submitWithFeeBump,
   simulateTransactionWithRetry,
 } = require("./stellar");
 const {
@@ -31,6 +32,21 @@ const { createDrainController } = require("./workerLifecycle");
 
 let intervalId = null;
 let isExecuting = false;
+
+// ─── Dynamic fee configuration (#1098 W1) ───────────────────────────────────
+// The keeper fee adapts to network conditions instead of using a hardcoded
+// 100,000-stroop fee: `fetchBaseFee()` (network minimum) x multiplier, capped
+// so a congestion spike can never blow through the donation budget.
+const RECURRING_KEEPER_FEE_MULTIPLIER = Number(
+  process.env.RECURRING_KEEPER_FEE_MULTIPLIER || 1.5,
+);
+const RECURRING_KEEPER_FEE_MAX_STROOPS = Number(
+  process.env.RECURRING_KEEPER_FEE_MAX_STROOPS || 500_000,
+);
+
+/** Fallback fee when the network base fee cannot be fetched (matches the
+ * previous hardcoded value, so behaviour degrades gracefully, never fails). */
+const RECURRING_KEEPER_FALLBACK_FEE_STROOPS = 100_000;
 
 // Tracks whether a keeper cycle is currently in flight so `stop()` can
 // wait for it to finish (or release control after its grace period)
@@ -141,10 +157,15 @@ async function runKeeperCycle() {
   // account can go stale if its sequence advances between submissions (e.g. an
   // external transaction or a failed attempt), causing later submissions to fail
   // with tx_bad_seq.
+  //
+  // The transaction fee is computed once per cycle (fresh per network state)
+  // and shared across schedules, so a cycle never makes N+1 Horizon calls.
+  const keeperFee = await fetchDynamicFee();
+
   for (const schedule of dueSchedules) {
     try {
       account = await stellarServer.loadAccount(keeperPublicKey);
-      await executeSchedule(schedule, account, keypair);
+      await executeSchedule(schedule, account, keypair, keeperFee);
       if (metrics.recurringExecutionsTotal) {
         metrics.recurringExecutionsTotal.inc({ status: "success" });
       }
@@ -180,14 +201,49 @@ async function fetchDueSchedules() {
 }
 
 /**
+ * Compute the keeper transaction fee in stroops, adapting to network
+ * conditions: `server.fetchBaseFee()` x RECURRING_KEEPER_FEE_MULTIPLIER,
+ * clamped to [100, RECURRING_KEEPER_FEE_MAX_STROOPS]. Falls back to the
+ * previous hardcoded 100,000 stroops when the network cannot be reached,
+ * so a Horizon blip never blocks the keeper cycle (#1098 W1).
+ *
+ * @returns {Promise<number>} Fee in stroops.
+ */
+async function fetchDynamicFee() {
+  try {
+    const baseFee = await stellarServer.fetchBaseFee();
+    if (!Number.isFinite(baseFee) || baseFee <= 0) {
+      return RECURRING_KEEPER_FALLBACK_FEE_STROOPS;
+    }
+    const computed = Math.ceil(baseFee * RECURRING_KEEPER_FEE_MULTIPLIER);
+    return Math.min(
+      Math.max(computed, 100),
+      RECURRING_KEEPER_FEE_MAX_STROOPS,
+    );
+  } catch (err) {
+    logger.warn(
+      {
+        event: "recurring_keeper_fee_fetch_failed",
+        err: err.message,
+      },
+      "Failed to fetch Stellar base fee — using fallback keeper fee",
+    );
+    return RECURRING_KEEPER_FALLBACK_FEE_STROOPS;
+  }
+}
+
+/**
  * Execute a single recurring donation on-chain.
  */
-async function executeSchedule(schedule, account, keypair) {
+async function executeSchedule(schedule, account, keypair, feeStroops) {
   const contractId = process.env.CONTRACT_ID;
   const contract = new Contract(contractId);
   
   const tx = new TransactionBuilder(account, {
-    fee: "100000", // High starting fee for simulation
+    // Dynamic fee (network base fee x multiplier, capped); used as the
+    // simulation starting fee — the final fee comes from the simulation
+    // via assembleTransaction (#1098 W1).
+    fee: String(feeStroops || RECURRING_KEEPER_FALLBACK_FEE_STROOPS),
     networkPassphrase: NETWORK_PASSPHRASE,
   })
     .addOperation(
@@ -209,9 +265,8 @@ async function executeSchedule(schedule, account, keypair) {
   const preparedTx = rpc.assembleTransaction(tx, sim).build();
   
   preparedTx.sign(keypair);
-  const xdrString = preparedTx.toXDR();
-  
-  const submitResult = await submitTransaction(xdrString);
+  // submitWithFeeBump replaces submitTransaction
+  const submitResult = await submitWithFeeBump(preparedTx, keypair);
 
   logger.info(
     {

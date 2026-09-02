@@ -24,7 +24,7 @@ const webhookVerify = require("./webhookVerify");
 
 // ─── Test app factory ─────────────────────────────────────────────────────────
 
-function buildApp({ secret, replayWindowSeconds } = {}) {
+function buildApp({ secret, getSecret, replayWindowSeconds } = {}) {
   const app = express();
 
   // Use raw body so the middleware receives the exact bytes that were signed.
@@ -32,7 +32,7 @@ function buildApp({ secret, replayWindowSeconds } = {}) {
     "/webhook",
     express.raw({ type: "*/*" }),
     webhookVerify({
-      getSecret: async () => secret || "test-secret",
+      getSecret: getSecret ?? (async () => (secret === undefined ? "test-secret" : secret)),
       ...(replayWindowSeconds !== undefined ? { replayWindowSeconds } : {}),
     }),
     (req, res) => {
@@ -143,17 +143,17 @@ describe("webhookVerify middleware", () => {
     expect(res.headers["x-webhook-signature-reason"]).toBe(VerifyReason.UNKNOWN_VERSION);
   });
 
-  test("400: malformed header (no k=v pairs)", async () => {
+  test("400: malformed header (no k=v pairs) → MISSING_T", async () => {
     const app = buildApp();
     const res = await request(app)
       .post("/webhook")
       .set("X-Webhook-Signature", "not-a-valid-header")
       .send(BODY);
-    // No recognised version key → UNKNOWN_VERSION (fail-closed)
-    expect([400, 403]).toContain(res.status);
+    expect(res.status).toBe(400);
+    expect(res.body.reason).toBe(VerifyReason.MISSING_T);
   });
 
-  test("400: header with t= but no version key (UNKNOWN_VERSION)", async () => {
+  test("403: header with t= but no version key (UNKNOWN_VERSION)", async () => {
     const ts = freshTs();
     const app = buildApp();
     const res = await request(app)
@@ -223,8 +223,38 @@ describe("webhookVerify middleware", () => {
     expect(unknown.headers["x-webhook-signature-reason"]).toBe(VerifyReason.UNKNOWN_VERSION);
   });
 
+  test("500: getSecret returns an empty secret", async () => {
+    const ts = freshTs();
+    const app = buildApp({ secret: "" });
+    const res = await request(app)
+      .post("/webhook")
+      .set("X-Webhook-Signature", sign(BODY, SECRET, ts))
+      .send(BODY);
+    expect(res.status).toBe(500);
+  });
+
+  test("500: getSecret throws", async () => {
+    const ts = freshTs();
+    const app = buildApp({
+      getSecret: async () => {
+        throw new Error("vault unavailable");
+      },
+    });
+    const res = await request(app)
+      .post("/webhook")
+      .set("X-Webhook-Signature", sign(BODY, SECRET, ts))
+      .send(BODY);
+    expect(res.status).toBe(500);
+  });
+
   test("throws TypeError if getSecret is not provided", () => {
     expect(() => webhookVerify({})).toThrow(TypeError);
     expect(() => webhookVerify({ getSecret: "not-a-function" })).toThrow(TypeError);
+  });
+
+  test("throws TypeError if replayWindowSeconds is invalid", () => {
+    expect(() => webhookVerify({ getSecret: async () => "s", replayWindowSeconds: -1 })).toThrow(TypeError);
+    expect(() => webhookVerify({ getSecret: async () => "s", replayWindowSeconds: NaN })).toThrow(TypeError);
+    expect(() => webhookVerify({ getSecret: async () => "s", replayWindowSeconds: "300" })).toThrow(TypeError);
   });
 });

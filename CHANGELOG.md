@@ -2,6 +2,15 @@
 
 ### Features
 
+* **backend:** admin session management endpoints + email/password login with TOTP MFA (closes #1123)
+  - New `backend/src/routes/admin/sessions.js`: `GET /api/admin/sessions` lists active sessions (flagging the caller's), `DELETE /api/admin/sessions/:family` revokes one session family, and `DELETE /api/admin/sessions` revokes every session except the one identified by the refresh cookie
+  - New `admins` table (migration 032) with bcrypt `password_hash`, base32 `mfa_secret`, and `mfa_enabled`; `POST /api/admin/auth/login` authenticates by email + password
+  - `POST /api/admin/auth/mfa/setup` generates a TOTP secret with otpauth URL + QR code; `POST /api/admin/auth/mfa/verify` enables MFA after the first code verifies
+  - MFA logins are two-leg: the password leg returns a short-lived `mfa-challenge` token that is exchanged (with the TOTP code) at the same endpoint, so the password is never re-sent; `adminRequired` rejects `mfa-challenge` tokens outright
+  - Existing `X-Admin-Key` header auth and the env-credential `/api/admin/login` path are unchanged
+  - Session endpoints moved from `admin.js` into the new router; the old `POST /api/admin/sessions/:id/revoke` is replaced by `DELETE /api/admin/sessions/:family`
+  - New tests: 25 admin auth/session tests covering list/revoke acceptance criteria, MFA setup-verify roundtrip, and challenge-token rejection (62 total in `admin.test.js`)
+
 * **monitoring:** synthetic on-chain transaction monitoring + business-level metrics dashboards (closes #1144)
   - Part A: Add `scripts/synthetic-monitor.js` — proactive 5-minute full-path check (Horizon + Soroban RPC + `sendTransaction` + `getTransaction` confirmation) with Prometheus metrics (`synthetic_donation_success`, `synthetic_donation_duration_seconds`, `synthetic_donation_checks_total`, `synthetic_donation_last_timestamp`)
   - Part A: Add `.github/workflows/synthetic-monitor.yml` — scheduled GitHub Actions workflow (every 5 min, explicit `contents: read` + `issues: write` permissions); auto-creates GitHub issue on failure
@@ -59,6 +68,20 @@
   - Update `frontend/components/DonateForm.tsx` to support Space/Enter keys on donation amount preset buttons
   - Update `frontend/components/LanguageSwitcher.tsx` to prevent propagation of the Escape key
   - Add Jest unit tests for `useShortcuts` hook in `frontend/hooks/__tests__/useShortcuts.test.ts`
+* **testing,backend,scripts:** API fuzz conformance & load-test regression detection (epic #1101)
+  - **API fuzz (WS4):** schema-derived valid+invalid request generator (`backend/scripts/api-fuzz/values.js`), dependency-free JSON-Schema validator (`validator.js`), OpenAPI→plan extractor (`plan.js`), and live conformance runner (`conformance.js`) asserting “no 5xx for invalid input”, declared-status-code membership, and response-body conformance
+  - **Offline self-test** `node scripts/validate-openapi.js --fuzz N` proves every valid case satisfies its schema and every invalid case violates it (fast, in PR CI); `--live <baseUrl> N` runs the live conformance scan (nightly)
+  - **Guaranteed-invalid construction:** mutations are kept only when the schema validator independently rejects them, with a forced wrong-root-type fallback, so labelled-invalid cases are never fuzzer noise
+  - **Load-test regression (WS6):** `backend/scripts/load-test-compare.js` + `scripts/load-test-compare.js` CLI parse k6 `--summary-export`, compare against the committed `scripts/load-test-baseline.json`, and render a PR comment; thresholds warn >20% p95 Δ (or throughput Δ < −10%) and block >50% p95 Δ / >500ms hard gate
+  - **k6 script** gains `SCENARIO=pr`, `PR_VUS`, `PR_DURATION` for lighter PR-load profiles
+  - **CI:** fast fuzz self-test in the `openapi-lint` job (ci.yml); nightly full fuzz + optional live scan (`fuzz-nightly.yml`); nightly load test + baseline compare + optional PR comment (`load-test-nightly.yml`)
+  - 46 new unit tests across `backend/__tests__/fuzz` and `backend/__tests__/scripts`; usage docs in `docs/quality-and-fuzzing.md`
+* **testing,contracts,frontend:** remaining workstreams of epic #1101 (formal verification, cross-contract fuzz, chaos, visual regression, synthetic donation)
+  - **Kani formal verification (WS1):** pure-function mirror harnesses prove escrow payout bounds (single + summed milestones), oracle TWAP bounds, reverse-donation accounting, global-total accumulation, badge-tier monotonicity, and attestation status-count preservation over unbounded inputs; `contracts/indigopay-contract/VERIFICATION.md` documents each harness; the `Formal Verification (Kani)` CI job in `contracts.yml` gates on `cargo kani`
+  - **Cross-contract invariant fuzzing (WS2):** `contracts/indigopay-contract/tests/cross_contract_fuzz.rs` deploys IndigoPay + oracle + native/USDC + real attestation contract and asserts global accounting invariants after every random op; `contracts/attestation-contract/src/fuzz_tests.rs` property-tests the bridge (replay guard, aggregate consistency, lifecycle accounting) — run nightly as the `Cross-Contract Fuzz` CI job
+  - **Chaos engineering (WS3):** `test/chaos/` now has 6 donation-pipeline scenarios — Redis crash, Postgres failover, Horizon 503, Soroban RPC timeout, **network partition** (`05-redis-partition.js`), and **cascading failure** (`06-cascading.js`); nightly `chaos-nightly.yml`
+  - **Visual regression (WS5):** committed Playwright screenshot baselines (`frontend/e2e/visual.spec.ts-snapshots/`) diffed against every PR by the dedicated `frontend-visual.yml` job (reviewer-gated `workflow_dispatch` regenerates baselines); `frontend/VISUAL_REGRESSION.md` documents the maintenance flow
+  - **Synthetic donation E2E monitoring (WS7):** `frontend/tests/e2e/synthetic-donation.spec.ts` runs the full wallet→donate→confirm→dashboard→leaderboard browser journey in the existing `frontend-e2e` job
 
 * **monitoring:** multi-window SLO burn-rate alerting with error budget dashboard (closes #240)
   - Defined SLOs: donation recording (99.5%) and project listing (99.9%) over 30-day rolling windows
@@ -257,6 +280,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **backend/testing:** add chaos harness (`backend/test/chaos/`) for worker crash-safety and partial-failure recovery — 8 scenarios covering kill-after-claim/lease-reclaim, DB-commit/queue-ack gap with idempotent dedup, queue-store outage with backoff/resume, two recovery paths racing on a stranded job, deliberate idempotency-guard removal regression detection, crash-during-DLQ-replay nested fault, batch lease-expiry cycle (no loss/no dup), and DLQ poison isolation + targeted replay; includes `FaultInjector`, `FakeConsumer`, assertion helpers, CI `chaos` job (10 min bounded), and `docs/chaos-harness.md` (closes #939)
 - **backend/security:** productionize webhook signature scheme — add `VerifyReason` error codes (`MALFORMED`, `MISSING_T`, `UNKNOWN_VERSION`, `STALE`, `MISMATCH`), `verifyWithReason()` API, `SUPPORTED_VERSIONS` enum, `webhookVerify` Express middleware with structured HTTP-status mapping, canonical cross-language test vectors (`webhookSign.vectors.json`, locked by `webhookSign.vectors.test.js`), and algorithm versioning policy doc (`docs/webhook-signing-versioning.md`) covering v1→v2 dual-sign migration path (closes #933)
 
 ### Fixed
@@ -316,6 +340,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **contracts:** eliminate milestone payout rounding-dust by paying the exact remainder on the final milestone release and compute exact residual in compute_remaining_funds (closes #736)
 - **ci,extension:** stop tracking the generated `greenpay-extension.zip` in git, generate it from source in CI, and verify the packaged artifact is reproducible across two builds (closes #696)
 - **contracts:** prevent challenge and refund flows from reversing the same donation twice; invalid finalization attempts now return structured errors instead of underflowing accounting.
 - **frontend:** pin locale (`en-US`) and timezone (`UTC`) for date/number formatting helpers (`formatDate`, `formatDateTime`, `formatTime`, `formatMonthYear`, `formatNumber`) and replace raw `Intl.*`/`toLocaleString` calls in SSR-rendered components, making server/client output deterministic and eliminating hydration mismatches (closes #652)

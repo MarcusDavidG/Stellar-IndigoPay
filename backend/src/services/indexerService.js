@@ -20,8 +20,9 @@
  */
 "use strict";
 
-const { server: stellarServer } = require("./stellar");
+const { server: stellarServer, rpcBreaker } = require("./stellar");
 const pool = require("../db/pool");
+const crypto = require("crypto");
 const { handleDonation, setUsdcToXlmRate } = require("./indexerDonationHandler");
 const { enqueue: enqueueDLQ } = require("./indexerDLQWorker");
 const logger = require("../logger");
@@ -78,10 +79,25 @@ const USDC_ASSET_CODE = "USDC";
 async function readCursor() {
   try {
     const result = await pool.query(
-      "SELECT last_processed_ledger FROM indexer_state WHERE key = 'primary'",
+      "SELECT last_processed_ledger, cursor_hash FROM indexer_state WHERE key = 'primary'",
     );
-    return result.rows[0]?.last_processed_ledger || 0;
+    if (!result.rows[0]) return 0;
+
+    const ledger = result.rows[0].last_processed_ledger;
+    const storedHash = result.rows[0].cursor_hash;
+
+    if (storedHash) {
+      const expectedHash = crypto.createHash("sha256").update(String(ledger)).digest("hex");
+      if (storedHash !== expectedHash) {
+        throw new Error(`Checkpoint corruption detected: hash mismatch for ledger ${ledger}`);
+      }
+    }
+
+    return ledger || 0;
   } catch (err) {
+    if (err.message.includes("Checkpoint corruption detected")) {
+      throw err;
+    }
     logger.warn(
       { event: "indexer_cursor_read_error", err: err.message },
       "Cannot read cursor from DB, starting from 0",
@@ -98,12 +114,14 @@ async function readCursor() {
  * @returns {Promise<void>}
  */
 async function updateCursor(client, ledger) {
+  const hash = crypto.createHash('sha256').update(String(ledger)).digest('hex');
   await client.query(
     `UPDATE indexer_state
      SET last_processed_ledger = GREATEST(last_processed_ledger, $1),
+         cursor_hash = $2,
          last_processed_at = NOW()
      WHERE key = 'primary'`,
-    [ledger],
+    [ledger, hash],
   );
 }
 
@@ -172,6 +190,12 @@ async function updateProjectWallets() {
 /**
  * Open (or re-open) the Horizon SSE operations stream.
  * Uses the persisted cursor so restarts resume from where we left off.
+ *
+ * The stream is integrated with the shared RPC circuit breaker (#1098 W1):
+ * a persistent stream failure records a breaker failure, and after the
+ * threshold the breaker OPENs so reconnect attempts fail fast instead of
+ * hammering Horizon — the breaker half-opens after its cooldown and the
+ * first successful stream open re-closes it.
  */
 async function openStream() {
   const cursor = await readCursor();
@@ -182,65 +206,80 @@ async function openStream() {
     `Opening Horizon operations stream at cursor ${cursorStr}`,
   );
 
-  horizonStream = stellarServer
-    .operations()
-    .cursor(cursorStr)
-    .stream({
-      onmessage: async (op) =>
-        drain.trackJob(async () => {
-          try {
-            lastProcessedLedger = Math.max(lastProcessedLedger, op.ledger_attr);
+  // The stream open is routed through the shared RPC circuit breaker (#1098 W1):
+  //  - when the breaker is OPEN it throws immediately (fail-fast) and the
+  //    reconnect loop backs off instead of hammering a dead Horizon endpoint;
+  //  - after the cooldown elapses `call()` half-opens, attempts the open, and a
+  //    successful open re-closes the breaker;
+  //  - a synchronous setup failure counts as a breaker failure;
+  //  - asynchronous stream errors (onerror) also record breaker failures, so a
+  //    persistently failing stream trips the breaker even though the initial
+  //    connection succeeded.
+  await rpcBreaker.call(() => {
+    horizonStream = stellarServer
+      .operations()
+      .cursor(cursorStr)
+      .stream({
+        onmessage: async (op) =>
+          drain.trackJob(async () => {
+            try {
+              lastProcessedLedger = Math.max(lastProcessedLedger, op.ledger_attr);
 
-            if (op.type !== "payment") return;
+              if (op.type !== "payment") return;
 
-            const isNative = op.asset_type === "native";
-            const isUSDC =
-              !isNative &&
-              op.asset_code === USDC_ASSET_CODE &&
-              usdcTokenAddress !== null &&
-              op.asset_issuer === usdcTokenAddress;
+              const isNative = op.asset_type === "native";
+              const isUSDC =
+                !isNative &&
+                op.asset_code === USDC_ASSET_CODE &&
+                usdcTokenAddress !== null &&
+                op.asset_issuer === usdcTokenAddress;
 
-            if (!isNative && !isUSDC) {
-              indexerOperationsSkipped.inc({ reason: "unsupported_asset" });
-              return;
-            }
-
-            const projectId = projectWallets.get(op.to);
-            if (projectId) {
-              const result = await handleDonation(projectId, op, { isNative, isUSDC, isBackfill: false }, {
-                onCursorUpdate: updateCursor,
-              });
-              // Batch donations for emission (not backfill/DLQ)
-              // Instead of emitting one event per donation, accumulate them
-              // and emit a single batch event after a time window (500ms by default).
-              if (donationBatcher && result) {
-                donationBatcher.addDonation({
-                  projectId,
-                  donorAddress: op.from,
-                  amountXLM: isNative ? parseFloat(op.amount) : null,
-                  amount: parseFloat(op.amount),
-                  currency: isNative ? "XLM" : "USDC",
-                  txHash: op.transaction_hash,
-                  timestamp: new Date().toISOString(),
-                });
+              if (!isNative && !isUSDC) {
+                indexerOperationsSkipped.inc({ reason: "unsupported_asset" });
+                return;
               }
-            } else {
-              indexerOperationsSkipped.inc({ reason: "no_matching_project" });
+
+              const projectId = projectWallets.get(op.to);
+              if (projectId) {
+                const result = await handleDonation(projectId, op, { isNative, isUSDC, isBackfill: false }, {
+                  onCursorUpdate: updateCursor,
+                });
+                // Batch donations for emission (not backfill/DLQ)
+                // Instead of emitting one event per donation, accumulate them
+                // and emit a single batch event after a time window (500ms by default).
+                if (donationBatcher && result) {
+                  donationBatcher.addDonation({
+                    projectId,
+                    donorAddress: op.from,
+                    amountXLM: isNative ? parseFloat(op.amount) : null,
+                    amount: parseFloat(op.amount),
+                    currency: isNative ? "XLM" : "USDC",
+                    txHash: op.transaction_hash,
+                    timestamp: new Date().toISOString(),
+                  });
+                }
+              } else {
+                indexerOperationsSkipped.inc({ reason: "no_matching_project" });
+              }
+            } catch (err) {
+              logger.error({ event: "indexer_op_error", err: err.message }, "Operation processing error");
+              enqueueDLQ(op.ledger_attr, op.transaction_hash, err.message).catch(() => {});
             }
-          } catch (err) {
-            logger.error({ event: "indexer_op_error", err: err.message }, "Operation processing error");
-            enqueueDLQ(op.ledger_attr, op.transaction_hash, err.message).catch(() => {});
-          }
-        }),
-      onerror: (err) => {
-        logger.error(
-          { event: "indexer_horizon_stream_error", err: String(err) },
-          "Horizon stream error — will reconnect with backoff",
-        );
-        closeStream();
-        scheduleReconnect("stream_error");
-      },
-    });
+          }),
+        onerror: (err) => {
+          logger.error(
+            { event: "indexer_horizon_stream_error", err: String(err) },
+            "Horizon stream error — will reconnect with backoff",
+          );
+          // Route asynchronous stream failures through the shared circuit
+          // breaker so a persistently failing Horizon endpoint trips it
+          // (fail-fast on reconnect attempts) instead of retrying forever.
+          rpcBreaker.recordFailure(new Error(`Horizon SSE: ${String(err)}`));
+          closeStream();
+          scheduleReconnect("stream_error");
+        },
+      });
+  });
 }
 
 /**
@@ -438,7 +477,19 @@ async function startIndexer(socketIo) {
   lagBackoffMs = Number(process.env.INDEXER_LAG_CHECK_INTERVAL_MS || 30_000);
   await checkLag();
 
-  await openStream();
+  try {
+    await openStream();
+  } catch (err) {
+    // A fail-fast from the RPC circuit breaker (e.g. Horizon is down or the
+    // breaker is still in cooldown from a prior outage) must never prevent the
+    // indexer from starting: the reconnect loop retries after the breaker
+    // cooldown elapses (#1098 W1).
+    logger.warn(
+      { event: "indexer_initial_open_failed", err: err.message },
+      "Initial Horizon stream open failed — will retry with backoff",
+    );
+    scheduleReconnect("initial_open_failed");
+  }
 }
 
 /**
@@ -504,7 +555,14 @@ async function stop() {
   reconnectAttempt = 0;
 }
 
+
+async function rescanRange({ fromLedger, toLedger }) {
+  const { runBackfill } = require("./indexerBackfill");
+  return runBackfill({ fromLedger, toLedger, force: true });
+}
+
 module.exports = {
+  rescanRange,
   startIndexer,
   getStatus,
   stop,

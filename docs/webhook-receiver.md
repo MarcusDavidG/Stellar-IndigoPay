@@ -19,7 +19,7 @@ verification flow are designed to be easy to consume in any language.
 
 ### Signature header format
 
-```
+```text
 X-Webhook-Signature: t=<unix seconds>,v1=<hex hmac-sha256>
 ```
 
@@ -40,7 +40,8 @@ different failure modes:
 | Reason | HTTP (inbound) | Meaning |
 |--------|---------------|---------|
 | `MALFORMED` | 400 | Header absent, empty, or not parseable |
-| `MISSING_T` | 400 | `t=` field absent or not a finite integer |
+| `MISSING_T` | 400 | `t=` field absent or not a finite safe integer (exact decimal) |
+| `MISSING_V1` | 400 | `v1=` field absent or empty |
 | `UNKNOWN_VERSION` | 403 | No recognised version prefix — fail-closed |
 | `STALE` | 408 | Timestamp outside replay window — check clock sync |
 | `MISMATCH` | 401 | HMAC mismatch — tampered body or wrong secret |
@@ -75,6 +76,7 @@ const Reason = {
   OK: "OK",
   MALFORMED: "MALFORMED",
   MISSING_T: "MISSING_T",
+  MISSING_V1: "MISSING_V1",
   UNKNOWN_VERSION: "UNKNOWN_VERSION",
   STALE: "STALE",
   MISMATCH: "MISMATCH",
@@ -94,22 +96,33 @@ function verify(body, secret, header) {
     }),
   );
 
-  const t = Number.parseInt(parts.t, 10);
-  if (!Number.isFinite(t)) return { ok: false, reason: Reason.MISSING_T };
+  // Timestamp must be exact decimal safe integer (no partial/fractional)
+  if (typeof parts.t !== "string" || !/^-?\d+$/.test(parts.t)) return { ok: false, reason: Reason.MISSING_T };
+  const t = Number(parts.t);
+  if (!Number.isSafeInteger(t)) return { ok: false, reason: Reason.MISSING_T };
 
-  // Fail-closed: reject if no recognised version key present
+  // v1 presence/emptiness before generic unknown-version check
+  if (Object.prototype.hasOwnProperty.call(parts, "v1")) {
+    if (typeof parts.v1 !== "string" || parts.v1.length === 0) return { ok: false, reason: Reason.MISSING_V1 };
+  } else {
+    const hasKnown = ["v1"].some((v) => parts[v] !== undefined && parts[v] !== "");
+    if (!hasKnown) return { ok: false, reason: Reason.UNKNOWN_VERSION };
+    return { ok: false, reason: Reason.MISSING_V1 };
+  }
   const v1 = parts.v1;
-  if (!v1) return { ok: false, reason: Reason.UNKNOWN_VERSION };
 
-  // Replay window: reject events whose timestamp is more than 5 minutes
-  // away from local clock. STALE is distinct from MISMATCH so you can
-  // alert on clock-synchronisation issues separately.
+  // Replay window: reject events whose timestamp is more than the configured
+  // window (default 5 minutes) away from local clock. STALE is distinct from
+  // MISMATCH so you can alert on clock-synchronisation issues separately.
+  const REPLAY_WINDOW_SECONDS = 5 * 60; // configurable — must match server
   const skew = Math.abs(Math.floor(Date.now() / 1000) - t);
-  if (skew > 5 * 60) return { ok: false, reason: Reason.STALE };
+  if (skew > REPLAY_WINDOW_SECONDS) return { ok: false, reason: Reason.STALE };
 
+  const prefix = Buffer.from(`${t}.`, "utf8");
+  const bodyBuf = Buffer.isBuffer(body) ? body : Buffer.from(String(body), "utf8");
   const expected = crypto
     .createHmac("sha256", secret)
-    .update(`${t}.${body}`)
+    .update(Buffer.concat([prefix, bodyBuf]))
     .digest();
   const got = Buffer.from(v1, "hex");
   if (got.length !== expected.length || !crypto.timingSafeEqual(got, expected))
